@@ -20,11 +20,13 @@
 ### 问题 1：PATCH 接口不支持杀伤链特有字段（⚠️ 严重）
 
 **数据服务器的 PATCH 请求体（TaskPatchRequest）：**
+> 定义位置：`SSL_DATA_API_README.md` → 2.5 PATCH /api/v1/task_pool/resources/{resource_id}
 ```
 title | description | attributes | search_text | state | payload
 ```
 
 **当前后端设计直接支持的字段：**
+> 定义位置：`demo/backend/app/models/schemas.py` → KillChainUpdate
 ```
 title | description | raw_entries | assigned_entries | resource_ids | target_ids | mapped_plan_ids | mapping_summary | network | state
 ```
@@ -43,6 +45,7 @@ title | description | raw_entries | assigned_entries | resource_ids | target_ids
 ### 问题 2：KillChainEntry 中的目标-装备映射缺失（⚠️ 严重）
 
 **当前前后端设计（前端表格 + 后端模型）：**
+> 前端假数据位置：`demo/frontend/src/.../data/planningDataModel.js` → killChainDetailMap.entries.executor_assignments
 ```js
 // 前端假数据
 executor_assignments: [
@@ -53,12 +56,14 @@ executor_assignments: [
 含义：装备A 分配到 目标1 和 目标2。
 
 **数据服务器 KillChainEntry 结构：**
+> 定义位置：`SSL_DATA_API_README.md` → KillChainEntry（文档末尾核心数据结构说明章节）
 ```
 entry_id, phase, entry_seq, target_ids, operation,
 executor_options, selected_executor, locked, is_valid, notes
 ```
 
 **数据服务器 KillChainExecutorOption：**
+> 定义位置：`SSL_DATA_API_README.md` → KillChainExecutorOption（文档末尾核心数据结构说明章节）
 ```
 executor_id, allocation_count, locked, note
 ```
@@ -91,6 +96,7 @@ executor_id, allocation_count, locked, note
 ### 问题 4：导入接口格式差异（⚠️ 中等）
 
 **数据服务器 5.6 import 请求体：**
+> 定义位置：`SSL_DATA_API_README.md` → 5.6 POST /api/v1/task_pool/ingestion/import（ImportRequest / ImportResult）
 ```json
 {
   "resources": [
@@ -110,6 +116,7 @@ executor_id, allocation_count, locked, note
 ```
 
 **当前后端 import 请求体：**
+> 定义位置：`demo/backend/app/routers/kill_chain.py` → task_pool_import / `demo/backend/app/services/task_pool.py` → import_resources
 ```json
 {
   "resources": [...],
@@ -127,8 +134,10 @@ executor_id, allocation_count, locked, note
 ### 问题 5：查询 2.4 返回格式（⚠️ 低）
 
 `GET /api/v1/task_pool/resources/by_type/KILL_CHAIN` 返回 `list[TaskView]`。
+> TaskView 定义位置：`SSL_DATA_API_README.md` → 3.1 核心数据结构说明 → TaskView（资源视图联合类型）
 
 当前后端代理接口 `POST /api/v1/task_pool/resources/query` 返回 `{ items, total }`。
+> 定义位置：`demo/backend/app/routers/kill_chain.py` → task_pool_query / `demo/backend/app/services/task_pool.py` → query
 
 差异不大，只需调整响应包装格式。
 
