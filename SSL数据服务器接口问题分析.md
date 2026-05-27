@@ -1,6 +1,7 @@
 # SSL 数据服务器接口问题分析
 
-> 数据服务器地址：`http://<host>:28801` | 文档：`SSL_DATA_API_README.md`
+> 数据服务器地址：`http://<host>:28801` | 文档：`SSL_DATA_API_README.md`  
+> 实测参考：`demo/backend/test.py`（三类接口调用范例）
 
 ---
 
@@ -15,185 +16,170 @@
 
 ---
 
-## 二、发现的问题
+## 二、test.py 实测发现与问题澄清
 
-### 问题 1：PATCH 接口不支持杀伤链特有字段（⚠️ 严重）
+### 2.1 查询接口（GET）— ✅ 无问题
 
-**数据服务器的 PATCH 请求体（TaskPatchRequest）：**
-> 定义位置：`SSL_DATA_API_README.md` → 2.5 PATCH /api/v1/task_pool/resources/{resource_id}
-```
-title | description | attributes | search_text | state | payload
-```
+**实测数据：** `test.py` 中调用 `GET /api/v1/task_pool/resources/kill_chain:kill_chain_001` 返回了完整的 KillChain 结构：
 
-**当前后端设计直接支持的字段：**
-> 定义来源：
-> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain
-> - `杀伤链示例数据与交互流程.md` → 2.1 Word示例到task_pool字段映射 / 3.2 KILL_CHAIN导入
-```
-title | description | raw_entries | assigned_entries | resource_ids | target_ids | mapped_plan_ids | mapping_summary | state
-```
-
-**矛盾点：**
-- 数据服务器的 PATCH **没有** `raw_entries`、`assigned_entries`、`network` 等杀伤链特有字段
-- 这些字段只能通过 `payload` 或 `attributes` 打包传递
-- 这意味着当前后端 router 中 `PATCH /kill-chains/{id}` 直接透传 `raw_entries` 的逻辑**无法直接对接数据服务器**
-
-**解决方向：**
-- 后端收到 PATCH 请求后，将杀伤链特有字段序列化到 `payload` 字段中，再转发给数据服务器
-- 或者通过 `attributes` 字典存储（但 `attributes` 通常用于元数据，不太适合存大量结构化数据）
-
----
-
-### 问题 2：KillChainEntry 中的目标-装备映射缺失（⚠️ 严重）
-
-**当前前后端设计（前端表格 + 后端模型）：**
-> 定义来源：
-> - `杀伤链示例数据与交互流程.md` → 2.2 原始杀伤链表示例 / 2.3 最终分配表示例
-> - `SSL构建示例数据.docx` → 原始Word需求（数据源头）
->
-> 前端假数据位置：`demo/frontend/src/.../data/planningDataModel.js` → killChainDetailMap.entries.executor_assignments
-```js
-// 前端假数据
-executor_assignments: [
-  { executor_name: '装备A', target_name: '目标1', locked: false },
-  { executor_name: '装备A', target_name: '目标2', locked: false },
-]
-```
-含义：装备A 分配到 目标1 和 目标2。
-
-**数据服务器 KillChainEntry 结构：**
-> 定义位置：
-> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain → KillChainEntry（杀伤链条目）
-> - `SSL_DATA_API_README.md` → KillChainEntry（文档末尾核心数据结构说明章节，task_pool实现版）
-```
-entry_id, phase, entry_seq, target_ids, operation,
-executor_options, selected_executor, locked, is_valid, notes
-```
-
-**数据服务器 KillChainExecutorOption：**
-> 定义位置：
-> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain → KillChainExecutorOption（执行资源选项）
-> - `SSL_DATA_API_README.md` → KillChainExecutorOption（文档末尾核心数据结构说明章节，task_pool实现版）
-```
-executor_id, allocation_count, locked, note
-```
-
-**矛盾点：**
-- 数据服务器的 `executor_options` **没有目标映射字段**（没有 `target_name` 或类似字段）
-- 一个装备可以同时分配到多个目标（如装备A→目标1、装备A→目标2），这个关系在数据服务器结构中没有地方存储
-- `target_ids` 在 entry 级别，表示该条目涉及的所有目标，但不表达"哪个装备负责哪个目标"
-
-**解决方向（需要产品/架构确认）：**
-- 方案A：将 `executor_options` 扩展，增加 `target_ids` 字段表示该装备负责的目标列表
-- 方案B：把装备-目标映射放到 `attributes` 或 `notes` 中作为扩展数据
-- 方案C：修改前端交互，改为"一个 entry 只对应一个目标"，这样 `selected_executor` 就自然绑定到 entry 的 `target_ids`
-
----
-
-### 问题 3：前端数据结构不一致（⚠️ 中等）
-
-| 前端当前字段 | 数据服务器字段 | 差异 |
-|-------------|---------------|------|
-| `kill_chain_id` | `kill_chain_id` + `resource_id` | 缺少 `resource_id`（如 `kill_chain:kc-demo-001`） |
-| `entries`（混合数组） | `raw_entries` + `assigned_entries`（分开） | 需要拆分 |
-| `targets`（对象数组 `{target_id, name, source}`） | `target_ids`（字符串数组） | 目标名称需要另存或查询 |
-| `executor_assignments` | `executor_options` | 字段名不同，结构不同 |
-| `network` | ❌ 无此字段 | 需要放到 `payload`/`attributes` 中 |
-| `target_names` | ❌ 无此字段 | 前端为了方便显示额外加的，需通过 target_ids 关联查询或缓存 |
-
----
-
-### 问题 4：导入接口格式差异（⚠️ 中等）
-
-**数据服务器 5.6 import 请求体：**
-> 定义位置：`SSL_DATA_API_README.md` → 5.6 POST /api/v1/task_pool/ingestion/import（ImportRequest / ImportResult）
 ```json
 {
-  "resources": [
-    {
-      "resource_id": "kill_chain:kc-xxx",
-      "task_type": "KILL_CHAIN",
-      "title": "...",
-      "kill_chain_id": "kc-xxx",
-      "raw_entries": [...],
-      "assigned_entries": [...],
-      ...
-    }
-  ],
-  "return_data_type": "typed",
+  "resource_id": "kill_chain:kill_chain_001",
+  "task_type": "KILL_CHAIN",
+  "title": "对敌装甲目标杀伤链",
+  "kill_chain_id": "kill_chain_001",
+  "state": "ACTIVE",
+  "resource_ids": ["eq_无人车A", "eq_巡逻无人机", "eq_无人车B", "target_001"],
+  "target_ids": ["target_001"],
+  "mapped_plan_ids": ["plan_001"],
+  "mapping_summary": {...},
+  "raw_entries": [{"entry_id": "entry_01", "phase": "RAW", ...}],
+  "assigned_entries": [{"entry_id": "entry_01", "phase": "ASSIGNED", ...}]
+}
+```
+
+**结论：** 数据服务器**完全支持** KillChain 特有字段的存储和查询返回，`raw_entries` / `assigned_entries` / `mapping_summary` 等字段都能正常读写。
+
+---
+
+### 2.2 插入接口（POST import）— ✅ 无问题
+
+**实测 payload：** `test.py` 中展示了完整的导入请求体，直接包含 KillChain 完整字段：
+
+```json
+{
+  "resources": [{
+    "task_type": "KILL_CHAIN",
+    "kill_chain_id": "kill_chain_001",
+    "raw_entries": [...],
+    "assigned_entries": [...]
+  }],
+  "return_data_type": "full",
   "ignore_errors": true
 }
 ```
 
-**当前后端 import 请求体：**
-> 定义来源：
-> - `杀伤链示例数据与交互流程.md` → 5.2 指控后端调用task_pool / 4.9 提交运行态缓存
-> - `后端设计与需求说明-20260518.md` → 数据接入管理相关章节
->
-> 代码位置：`demo/backend/app/routers/kill_chain.py` → task_pool_import
-```json
-{
-  "resources": [...],
-  "ignore_errors": false
+**注意：** `return_data_type` 用了 `"full"`，但文档中只列出 `"none"` / `"typed"` / `"raw"`。 `"full"` 可能是未文档化的有效值，或文档遗漏。
+
+**结论：** import 接口**支持**直接导入 KillChain 完整结构，无需转换。
+
+---
+
+### 2.3 更新接口（PATCH）— ⚠️ 需要通过 `payload` 字段
+
+**实测代码：** `test.py` 中 PATCH 请求体如下：
+
+```python
+patch_payload = {
+    "payload": {
+        "target_ids": ["target_002", "target_003"],
+        "mapped_plan_ids": ["plan_003", "plan_004"],
+        "mapping_summary": {...}
+    }
 }
 ```
 
-**差异：**
-- 数据服务器要求每个 resource 必须包含 `resource_id` 和 `task_type`
-- 数据服务器有 `return_data_type` 参数控制返回格式
-- 数据服务器返回 `normalized_resources`、`upserted_resources` 等统计信息
+**关键发现：** KillChain 特有字段必须放在 **`payload`** 字段内传递，不能直接作为顶层字段。
+
+| 字段 | 是否可直接 PATCH | 传递方式 |
+|------|----------------|----------|
+| `title` | ✅ | 顶层字段 |
+| `description` | ✅ | 顶层字段 |
+| `state` | ✅ | 顶层字段 |
+| `raw_entries` | ❌ | 放入 `payload` |
+| `assigned_entries` | ❌ | 放入 `payload` |
+| `target_ids` | ❌ | 放入 `payload` |
+| `mapped_plan_ids` | ❌ | 放入 `payload` |
+| `mapping_summary` | ❌ | 放入 `payload` |
+
+**对后端的影响：** 当前后端 router 中的 `PATCH /kill-chains/{id}` 直接接收 `raw_entries` / `assigned_entries` 等字段，需要加一层转换：
+- 收到前端请求 → 将特有字段打包到 `payload` → 转发给数据服务器
+- 从数据服务器读取 → 从 `payload` 解析特有字段 → 返回给前端
 
 ---
 
-### 问题 5：查询 2.4 返回格式（⚠️ 低）
+### 2.4 装备-目标映射关系 — ⚠️ 需要调整前端设计
 
-`GET /api/v1/task_pool/resources/by_type/KILL_CHAIN` 返回 `list[TaskView]`。
-> TaskView 定义位置：`SSL_DATA_API_README.md` → 3.1 核心数据结构说明 → TaskView（资源视图联合类型）
+**test.py 实测数据结构中的分配表达：**
 
-当前后端代理接口 `POST /api/v1/task_pool/resources/query` 返回 `{ items, total }`。
-> 定义位置：`demo/backend/app/routers/kill_chain.py` → task_pool_query / `demo/backend/app/services/task_pool.py` → query
+```json
+{
+  "entry_id": "entry_01",
+  "phase": "ASSIGNED",
+  "target_ids": ["target_001"],
+  "operation": "侦察",
+  "executor_options": [
+    {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": true, "note": "最终选定"}
+  ],
+  "selected_executor": "eq_无人车A",
+  "locked": true
+}
+```
 
-差异不大，只需调整响应包装格式。
+**关键发现：**
+
+| 当前前端设计 | test.py 实测数据结构 |
+|-------------|-------------------|
+| `executor_assignments: [{executor_name, target_name}]` — 装备→目标多对多映射 | `executor_options: [{executor_id, note}]` — 只是**候选/已选装备列表** |
+| 一个装备可以勾选多个目标 | `selected_executor` 只选一个装备负责该 entry 的所有 `target_ids` |
+
+**结论：** 数据服务器的 KillChainEntry 中，`executor_options` 本身**不包含目标映射**。一个 entry 的 target→装备关系是：
+- `target_ids` 在 entry 级别定义该条目涉及的所有目标
+- `selected_executor` 指定**一个**装备负责执行该条目（所有目标）
+- `executor_options` 只是候选装备列表（RAW 阶段）或已选装备（ASSIGNED 阶段）
+
+**对前端的影响：**
+- 如果业务需要"装备A负责目标1、装备B负责目标2"，需要拆分为**两个 entry**（每个 entry 一个 target）
+- 当前弹窗中的"一个装备勾选多个目标"交互需要调整为： entry 级别选装备，而非装备→目标多对多映射
 
 ---
 
-## 三、对接建议
+## 三、问题汇总与解决方案
 
-### 后端适配层改造点
-
-```
-当前后端 (FastAPI)          数据服务器 (Task Pool)
-       │                           │
-       ├─ PATCH /kill-chains/{id}  ├─ PATCH /task_pool/resources/{id}
-       │   (接收 raw_entries 等)   │   (只接收 title/desc/state/payload)
-       │         ↓                 │
-       │   需要转换层：把特有字段   │
-       │   打包到 payload 中       │
-       │                           │
-       ├─ GET /kill-chains/{id}    ├─ GET /task_pool/resources/{id}
-       │         ↓                 │
-       │   需要转换层：从 payload   │
-       │   解析出 raw_entries 等   │
-       │   返回给前端              │
-```
-
-### 前端适配点
-
-```
-1. 拆分 entries → raw_entries + assigned_entries
-2. executor_assignments → executor_options（字段名映射）
-3. 移除 target_names，通过 target_ids 查询目标名称
-4. 增加 resource_id 字段（kill_chain:xxx）
-5. network 数据放到 attributes 或单独处理
-```
+| 问题 | 严重程度 | 原因 | 解决方案 |
+|------|---------|------|----------|
+| PATCH 特有字段需放入 `payload` | 中等 | 数据服务器 PATCH 只识别通用字段 | 后端加转换层：收到请求后打包到 `payload`，读取后从 `payload` 解析 |
+| 装备-目标映射方式不同 | 中等 | 数据服务器用 `selected_executor` 表达一对一，前端设计为多对多 | 前端调整：entry 级别选装备，或拆分为单目标 entry |
+| `return_data_type: "full"` 未文档化 | 低 | 文档遗漏 | 与数据服务器团队确认，或改用 `"typed"` |
 
 ---
 
-## 四、需要确认的问题
+## 四、后端适配层改造建议
+
+```
+前端请求 ──→ 当前后端 (FastAPI) ──→ 数据转换层 ──→ 数据服务器 (task_pool)
+              │                       │
+              │  raw_entries          │  打包到 payload
+              │  assigned_entries     │  或 attributes
+              │  network              │
+              │                       │
+              │  从 payload 解析      │  返回 TaskView
+              │  特有字段             │
+              ↓                       ↓
+```
+
+**具体改造点：**
+
+1. **PATCH /kill-chains/{id}**
+   - 接收前端的 `raw_entries` / `assigned_entries` / `network` 等字段
+   - 序列化为 JSON 字符串放入 `payload` 字段
+   - 调用数据服务器 `PATCH /task_pool/resources/{resource_id}`
+
+2. **GET /kill-chains/{id}**
+   - 调用数据服务器 `GET /task_pool/resources/{resource_id}`
+   - 从返回的 `payload` 字段解析出 `raw_entries` / `assigned_entries` 等
+   - 组装为前端熟悉的结构返回
+
+3. **POST /kill-chains（创建）**
+   - 组装完整 KillChain 对象
+   - 调用数据服务器 `POST /task_pool/ingestion/import`
+
+---
+
+## 五、需要确认的问题
 
 | 问题 | 影响 | 建议决策方 |
 |------|------|-----------|
-| KillChainExecutorOption 是否增加 target_ids？ | 决定装备-目标多对多关系能否表达 | 架构/产品 |
-| PATCH 的杀伤链特有字段走 payload 还是 attributes？ | 决定后端转换层实现方式 | 后端开发 |
-| 前端是否需要保留 target_names 缓存？ | 决定前端数据流设计 | 前端开发 |
-| network 节点状态图是否存数据服务器？ | 决定状态同步方案 | 架构 |
+| `return_data_type: "full"` 是否稳定可用？ | 影响 import 接口返回值 | 数据服务器团队 |
+| 前端是否接受"一个 entry 只选一个装备"？ | 影响目标分配弹窗交互 | 产品/前端 |
+| `network` 节点状态图是否存数据服务器？ | 影响状态同步方案 | 架构 |
