@@ -26,7 +26,9 @@ title | description | attributes | search_text | state | payload
 ```
 
 **当前后端设计直接支持的字段：**
-> 定义来源：`SSL_DATA_API_README.md` → KillChain（文档末尾核心数据结构说明章节）
+> 定义来源：
+> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain
+> - `杀伤链示例数据与交互流程.md` → 2.1 Word示例到task_pool字段映射 / 3.2 KILL_CHAIN导入
 ```
 title | description | raw_entries | assigned_entries | resource_ids | target_ids | mapped_plan_ids | mapping_summary | state
 ```
@@ -45,6 +47,10 @@ title | description | raw_entries | assigned_entries | resource_ids | target_ids
 ### 问题 2：KillChainEntry 中的目标-装备映射缺失（⚠️ 严重）
 
 **当前前后端设计（前端表格 + 后端模型）：**
+> 定义来源：
+> - `杀伤链示例数据与交互流程.md` → 2.2 原始杀伤链表示例 / 2.3 最终分配表示例
+> - `SSL构建示例数据.docx` → 原始Word需求（数据源头）
+>
 > 前端假数据位置：`demo/frontend/src/.../data/planningDataModel.js` → killChainDetailMap.entries.executor_assignments
 ```js
 // 前端假数据
@@ -56,14 +62,18 @@ executor_assignments: [
 含义：装备A 分配到 目标1 和 目标2。
 
 **数据服务器 KillChainEntry 结构：**
-> 定义位置：`SSL_DATA_API_README.md` → KillChainEntry（文档末尾核心数据结构说明章节）
+> 定义位置：
+> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain → KillChainEntry（杀伤链条目）
+> - `SSL_DATA_API_README.md` → KillChainEntry（文档末尾核心数据结构说明章节，task_pool实现版）
 ```
 entry_id, phase, entry_seq, target_ids, operation,
 executor_options, selected_executor, locked, is_valid, notes
 ```
 
 **数据服务器 KillChainExecutorOption：**
-> 定义位置：`SSL_DATA_API_README.md` → KillChainExecutorOption（文档末尾核心数据结构说明章节）
+> 定义位置：
+> - `后端设计与需求说明-20260518.md` → 1.10 杀伤链KillChain → KillChainExecutorOption（执行资源选项）
+> - `SSL_DATA_API_README.md` → KillChainExecutorOption（文档末尾核心数据结构说明章节，task_pool实现版）
 ```
 executor_id, allocation_count, locked, note
 ```
@@ -116,7 +126,11 @@ executor_id, allocation_count, locked, note
 ```
 
 **当前后端 import 请求体：**
-> 定义位置：`demo/backend/app/routers/kill_chain.py` → task_pool_import / `demo/backend/app/services/task_pool.py` → import_resources
+> 定义来源：
+> - `杀伤链示例数据与交互流程.md` → 5.2 指控后端调用task_pool / 4.9 提交运行态缓存
+> - `后端设计与需求说明-20260518.md` → 数据接入管理相关章节
+>
+> 代码位置：`demo/backend/app/routers/kill_chain.py` → task_pool_import
 ```json
 {
   "resources": [...],
