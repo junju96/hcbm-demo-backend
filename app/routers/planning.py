@@ -22,12 +22,20 @@ async def planning_events_overview(
 
     # 立即推送初始化事件
     from app.services.task_pool import task_pool
+    from app.services.data_server_client import query_kill_chains, to_frontend_killchain_list
     all_resources = task_pool.all()
 
     commands = []
     missions = []
     plans = []
     kill_chains = []
+
+    # KILL_CHAIN 从数据服务器获取
+    try:
+        ds_items = query_kill_chains(limit=50)
+        kill_chains = to_frontend_killchain_list(ds_items)
+    except Exception:
+        pass
 
     for res in all_resources.values():
         summary = {"resource_id": res.get("resource_id"), "title": res.get("title", ""), "state": res.get("state", "INIT")}
@@ -38,8 +46,6 @@ async def planning_events_overview(
             missions.append(summary)
         elif tt == "PLAN":
             plans.append(summary)
-        elif tt == "KILL_CHAIN":
-            kill_chains.append(summary)
 
     init_data = {
         "commands": commands,
@@ -69,7 +75,12 @@ async def planning_events_detail(
 
     # 立即推送初始化事件
     from app.services.task_pool import task_pool
-    detail = task_pool.get(resource_id)
+    from app.services.data_server_client import get_kill_chain
+    detail = None
+    if resource_type.lower() == "kill_chain":
+        detail = get_kill_chain(resource_id)
+    if not detail:
+        detail = task_pool.get(resource_id)
     if detail:
         init_data = {
             "resource_type": resource_type,

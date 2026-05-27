@@ -15,6 +15,15 @@ from app.models.schemas import (
 )
 from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
+from app.services.data_server_client import (
+    get_kill_chain as ds_get_kill_chain,
+    query_kill_chains as ds_query_kill_chains,
+    create_kill_chain as ds_create_kill_chain,
+    patch_kill_chain as ds_patch_kill_chain,
+    delete_kill_chain as ds_delete_kill_chain,
+    to_frontend_killchain,
+    to_frontend_killchain_list,
+)
 
 router = APIRouter()
 
@@ -24,8 +33,13 @@ def _new_id(prefix: str) -> str:
 
 
 def _get_kill_chain(kill_chain_id: str):
-    """获取杀伤链，支持带前缀或不带前缀"""
+    """获取杀伤链，优先从数据服务器查询（支持带前缀或不带前缀）"""
     rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
+    # 1. 优先从数据服务器获取
+    kc = ds_get_kill_chain(rid)
+    if kc:
+        return kc, rid
+    # 2. fallback 到本地内存
     kc = task_pool.get(rid)
     if not kc:
         raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
@@ -91,7 +105,7 @@ def _build_resource_candidates(operation: str, keyword: Optional[str] = None, li
 
 @router.post("/kill-chains", response_model=ApiResponse)
 async def create_kill_chain(req: Request, body: KillChainCreate):
-    """创建杀伤链"""
+    """创建杀伤链 —— 调用数据服务器 import 接口（或 mock）"""
     kc_id = _new_id("kc")
     rid = f"kill_chain:{kc_id}"
 
@@ -109,23 +123,21 @@ async def create_kill_chain(req: Request, body: KillChainCreate):
         "resource_ids": [],
         "target_ids": target_ids,
         "mapped_plan_ids": [],
-        "connections": [],
-        "dependencies": [],
-        "relations": [],
-        "attributes": {
-            "created_from": "api",
-            "target_display": target_display,
-        },
+        "mapping_summary": {},
         "raw_entries": [],
         "assigned_entries": [],
-        "mapping_summary": {},
         "network": {"nodes": [], "edges": []},
         "search_text": body.title + " " + body.description,
         "created_at": now,
         "updated_at": now,
+        "attributes": {
+            "created_from": "api",
+            "target_display": target_display,
+        },
     }
 
-    task_pool.set(rid, kill_chain)
+    # 调用数据服务器（或 mock fallback）
+    result = ds_create_kill_chain(kill_chain)
 
     # SSE 推送
     await sse_manager.push_overview_changed(
@@ -134,50 +146,71 @@ async def create_kill_chain(req: Request, body: KillChainCreate):
         action="CREATE",
     )
 
-    return ApiResponse(data={"kill_chain_id": kc_id, "resource_id": rid, "status": "created"})
+    return ApiResponse(data={"kill_chain_id": kc_id, "resource_id": rid, "status": "created", "ds_result": result})
 
 
 @router.get("/kill-chains/{kill_chain_id}", response_model=ApiResponse)
 async def get_kill_chain(kill_chain_id: str):
-    """获取杀伤链详情"""
-    kc, rid = _get_kill_chain(kill_chain_id)
-    return ApiResponse(data=kc)
+    """获取杀伤链详情 —— 调用数据服务器查询（或 mock fallback）"""
+    rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
+
+    # 1. 调用数据服务器
+    data = ds_get_kill_chain(rid)
+    if data:
+        return ApiResponse(data=to_frontend_killchain(data))
+
+    # 2. fallback 到本地内存
+    kc = task_pool.get(rid)
+    if kc:
+        return ApiResponse(data=kc)
+
+    raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
 
 
 @router.patch("/kill-chains/{kill_chain_id}", response_model=ApiResponse)
 async def update_kill_chain(kill_chain_id: str, body: KillChainUpdate):
-    """更新杀伤链"""
-    kc, rid = _get_kill_chain(kill_chain_id)
+    """更新杀伤链 —— 调用数据服务器 PATCH（特有字段打包到 payload）"""
+    rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
 
     payload = body.model_dump(exclude_none=True)
     if not payload:
-        return ApiResponse(data=kc)
+        kc = ds_get_kill_chain(rid) or task_pool.get(rid)
+        return ApiResponse(data=to_frontend_killchain(kc) if kc else {})
 
-    updated = task_pool.patch(rid, payload)
+    # 调用数据服务器（或 mock fallback）
+    updated = ds_patch_kill_chain(rid, payload)
+    if updated:
+        # 同时更新本地缓存（保持兼容）
+        task_pool.patch(rid, payload)
 
-    # SSE 推送
-    await sse_manager.push_kill_chain_detail(rid, "planning.detail.changed", updated, "杀伤链内容已更新")
-    await sse_manager.push_overview_changed(
-        "planning_home", "KILL_CHAIN", rid,
-        summary={"title": updated.get("title", ""), "state": updated.get("state", "")},
-    )
+        # SSE 推送
+        await sse_manager.push_kill_chain_detail(rid, "planning.detail.changed", updated, "杀伤链内容已更新")
+        await sse_manager.push_overview_changed(
+            "planning_home", "KILL_CHAIN", rid,
+            summary={"title": updated.get("title", ""), "state": updated.get("state", "")},
+        )
 
-    return ApiResponse(data=updated)
+        return ApiResponse(data=to_frontend_killchain(updated))
+
+    raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
 
 
 @router.delete("/kill-chains/{kill_chain_id}", response_model=ApiResponse)
 async def delete_kill_chain(kill_chain_id: str):
-    """删除杀伤链"""
-    kc, rid = _get_kill_chain(kill_chain_id)
-    task_pool.update_lifecycle(rid, "DELETED", "user_deleted")
+    """删除杀伤链 —— 调用数据服务器生命周期接口（或 mock）"""
+    rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
 
-    await sse_manager.push_overview_changed(
-        "planning_home", "KILL_CHAIN", rid,
-        summary={"title": kc.get("title", ""), "state": "DELETED"},
-        action="DELETE",
-    )
+    success = ds_delete_kill_chain(rid)
+    if success:
+        task_pool.update_lifecycle(rid, "DELETED", "user_deleted")
+        await sse_manager.push_overview_changed(
+            "planning_home", "KILL_CHAIN", rid,
+            summary={"title": "", "state": "DELETED"},
+            action="DELETE",
+        )
+        return ApiResponse(data={"kill_chain_id": kill_chain_id, "result": "success"})
 
-    return ApiResponse(data={"kill_chain_id": kill_chain_id, "result": "success"})
+    raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
 
 
 @router.post("/kill-chains/{kill_chain_id}/forward", response_model=ApiResponse)
@@ -192,8 +225,13 @@ async def forward_kill_chain(kill_chain_id: str, body: Dict[str, str]):
 
 @router.post("/kill-chains/{kill_chain_id}/entries", response_model=ApiResponse)
 async def add_entry(kill_chain_id: str, body: KillChainEntryCreate):
-    """增加杀伤链条目"""
-    kc, rid = _get_kill_chain(kill_chain_id)
+    """增加杀伤链条目 —— 更新数据服务器 raw_entries"""
+    rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
+
+    # 从数据服务器获取最新数据
+    kc = ds_get_kill_chain(rid) or task_pool.get(rid)
+    if not kc:
+        raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
 
     entry_id = _new_id("entry")
     entry = {
@@ -210,24 +248,34 @@ async def add_entry(kill_chain_id: str, body: KillChainEntryCreate):
     }
 
     raw_entries = kc.get("raw_entries", []) + [entry]
-    updated = task_pool.patch(rid, {"raw_entries": raw_entries})
 
-    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.entries_changed", updated, "杀伤链条目已增加")
+    # 调用数据服务器 PATCH（特有字段打包到 payload）
+    updated = ds_patch_kill_chain(rid, {"raw_entries": raw_entries})
+    # 同时更新本地缓存
+    task_pool.patch(rid, {"raw_entries": raw_entries})
+
+    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.entries_changed", updated or kc, "杀伤链条目已增加")
 
     return ApiResponse(data={"entry_id": entry_id, "kill_chain_id": kill_chain_id})
 
 
 @router.delete("/kill-chains/{kill_chain_id}/entries/{entry_id}", response_model=ApiResponse)
 async def delete_entry(kill_chain_id: str, entry_id: str):
-    """删除杀伤链条目"""
-    kc, rid = _get_kill_chain(kill_chain_id)
+    """删除杀伤链条目 —— 更新数据服务器"""
+    rid = kill_chain_id if kill_chain_id.startswith("kill_chain:") else f"kill_chain:{kill_chain_id}"
+
+    kc = ds_get_kill_chain(rid) or task_pool.get(rid)
+    if not kc:
+        raise HTTPException(status_code=404, detail=f"KillChain not found: {kill_chain_id}")
 
     raw_entries = [e for e in kc.get("raw_entries", []) if e.get("entry_id") != entry_id]
     assigned_entries = [e for e in kc.get("assigned_entries", []) if e.get("entry_id") != entry_id]
 
-    updated = task_pool.patch(rid, {"raw_entries": raw_entries, "assigned_entries": assigned_entries})
+    # 调用数据服务器 PATCH
+    updated = ds_patch_kill_chain(rid, {"raw_entries": raw_entries, "assigned_entries": assigned_entries})
+    task_pool.patch(rid, {"raw_entries": raw_entries, "assigned_entries": assigned_entries})
 
-    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.entries_changed", updated, "杀伤链条目已删除")
+    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.entries_changed", updated or kc, "杀伤链条目已删除")
 
     return ApiResponse(data={"entry_id": entry_id, "result": "success"})
 
@@ -283,9 +331,11 @@ async def auto_allocate(kill_chain_id: str, entry_id: str, body: AutoAllocateReq
     }
 
     assigned_entries = kc.get("assigned_entries", []) + [assigned_entry]
-    updated = task_pool.patch(rid, {"assigned_entries": assigned_entries})
+    # 调用数据服务器 PATCH
+    updated = ds_patch_kill_chain(rid, {"assigned_entries": assigned_entries})
+    task_pool.patch(rid, {"assigned_entries": assigned_entries})
 
-    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.resource_allocated", updated, "自动分配完成")
+    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.resource_allocated", updated or kc, "自动分配完成")
 
     return ApiResponse(data={
         "job_id": _new_id("auto-alloc"),
@@ -308,7 +358,7 @@ async def manual_allocate(kill_chain_id: str, entry_id: str, body: ResourceAlloc
     assigned_entry = {
         "entry_id": _new_id("assigned"),
         "phase": "ASSIGNED",
-        "entry_seq": 0,  # 实际应从原始条目继承
+        "entry_seq": 0,
         "target_ids": [],
         "operation": "",
         "executor_options": [{
@@ -332,9 +382,11 @@ async def manual_allocate(kill_chain_id: str, entry_id: str, body: ResourceAlloc
         assigned_entry["operation"] = raw_entry["operation"]
 
     assigned_entries = kc.get("assigned_entries", []) + [assigned_entry]
-    updated = task_pool.patch(rid, {"assigned_entries": assigned_entries})
+    # 调用数据服务器 PATCH
+    updated = ds_patch_kill_chain(rid, {"assigned_entries": assigned_entries})
+    task_pool.patch(rid, {"assigned_entries": assigned_entries})
 
-    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.resource_allocated", updated, "人工分配完成")
+    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.resource_allocated", updated or kc, "人工分配完成")
 
     return ApiResponse(data={
         "kill_chain_id": kill_chain_id,
@@ -420,7 +472,11 @@ async def generate_plan(kill_chain_id: str, body: GeneratePlanRequest):
         "resource_count": len(kc.get("resource_ids", [])),
         "generated_plan_resource_id": plan_rid,
     }
-    updated_kc = task_pool.patch(rid, {
+    updated_kc = ds_patch_kill_chain(rid, {
+        "mapped_plan_ids": mapped_plan_ids,
+        "mapping_summary": mapping_summary,
+    })
+    task_pool.patch(rid, {
         "mapped_plan_ids": mapped_plan_ids,
         "mapping_summary": mapping_summary,
     })
@@ -447,7 +503,14 @@ async def generate_plan(kill_chain_id: str, body: GeneratePlanRequest):
 async def activate_kill_chain(kill_chain_id: str):
     """激活杀伤链"""
     kc, rid = _get_kill_chain(kill_chain_id)
-    updated = task_pool.patch(rid, {
+    updated = ds_patch_kill_chain(rid, {
+        "state": "ACTIVE",
+        "attributes": {
+            **kc.get("attributes", {}),
+            "activated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    })
+    task_pool.patch(rid, {
         "state": "ACTIVE",
         "attributes": {
             **kc.get("attributes", {}),
@@ -465,7 +528,8 @@ async def activate_kill_chain(kill_chain_id: str):
 async def deactivate_kill_chain(kill_chain_id: str):
     """静默杀伤链"""
     kc, rid = _get_kill_chain(kill_chain_id)
-    updated = task_pool.patch(rid, {"state": "DEACTIVATED"})
+    updated = ds_patch_kill_chain(rid, {"state": "DEACTIVATED"})
+    task_pool.patch(rid, {"state": "DEACTIVATED"})
 
     await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.deactivated", updated, "杀伤链已静默，资源状态同步暂停")
     await sse_manager.push_overview_changed("planning_home", "KILL_CHAIN", rid, summary={"title": updated.get("title", ""), "state": "DEACTIVATED"})
@@ -510,7 +574,8 @@ async def kill_chain_remapping(body: Dict[str, Any]):
             a.get("status") == "READY" for a in stage.get("actions", [])
         ) else "BLOCKED"
 
-    updated = task_pool.patch(rid, {"network": network})
+    updated = ds_patch_kill_chain(rid, {"network": network})
+    task_pool.patch(rid, {"network": network})
 
     await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain_mapping.completed", updated, "杀伤链重映射完成")
 
@@ -526,9 +591,17 @@ async def kill_chain_remapping(body: Dict[str, Any]):
 
 @router.post("/task_pool/resources/query", response_model=ApiResponse)
 async def task_pool_query(body: Dict[str, Any]):
-    """查询 task_pool 资源"""
+    """查询 task_pool 资源 —— 杀伤链类型调用数据服务器（或 mock fallback）"""
+    task_type = body.get("task_type")
+
+    # 杀伤链类型：调用数据服务器
+    if task_type == "KILL_CHAIN":
+        items = ds_query_kill_chains(limit=body.get("limit", 20))
+        return ApiResponse(data={"items": to_frontend_killchain_list(items), "total": len(items)})
+
+    # 其他类型：使用本地内存
     results = task_pool.query(
-        task_type=body.get("task_type"),
+        task_type=task_type,
         state=body.get("state"),
         parent_resource_id=body.get("plan_id") or body.get("parent_resource_id"),
         keyword=body.get("keyword"),
@@ -540,7 +613,12 @@ async def task_pool_query(body: Dict[str, Any]):
 
 @router.get("/task_pool/resources/{resource_id}", response_model=ApiResponse)
 async def task_pool_get(resource_id: str):
-    """获取单个资源详情"""
+    """获取单个资源详情 — KILL_CHAIN 优先从数据服务器查询"""
+    # KILL_CHAIN 类型优先从数据服务器获取
+    if resource_id.startswith("kill_chain:") or "kill_chain" in resource_id:
+        res = ds_get_kill_chain(resource_id)
+        if res:
+            return ApiResponse(data=res)
     res = task_pool.get(resource_id)
     if not res:
         raise HTTPException(status_code=404, detail=f"Resource not found: {resource_id}")
@@ -549,8 +627,19 @@ async def task_pool_get(resource_id: str):
 
 @router.patch("/task_pool/resources/{resource_id}", response_model=ApiResponse)
 async def task_pool_patch(resource_id: str, body: Dict[str, Any]):
-    """增量更新资源"""
+    """增量更新资源 — KILL_CHAIN 类型转发到数据服务器"""
     payload = body.get("payload", body)
+    # 判断是否是 KILL_CHAIN
+    existing = task_pool.get(resource_id) or {}
+    is_kill_chain = existing.get("task_type") == "KILL_CHAIN" or resource_id.startswith("kill_chain:")
+
+    if is_kill_chain:
+        updated = ds_patch_kill_chain(resource_id, payload)
+        if updated:
+            task_pool.patch(resource_id, payload)
+            await sse_manager.push_kill_chain_detail(resource_id, "planning.detail.changed", updated, "资源已更新")
+            return ApiResponse(data=updated)
+
     updated = task_pool.patch(resource_id, payload)
     if not updated:
         raise HTTPException(status_code=404, detail=f"Resource not found: {resource_id}")
