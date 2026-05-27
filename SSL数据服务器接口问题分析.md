@@ -26,9 +26,9 @@ title | description | attributes | search_text | state | payload
 ```
 
 **当前后端设计直接支持的字段：**
-> 定义位置：`demo/backend/app/models/schemas.py` → KillChainUpdate
+> 定义来源：`SSL_DATA_API_README.md` → KillChain（文档末尾核心数据结构说明章节）
 ```
-title | description | raw_entries | assigned_entries | resource_ids | target_ids | mapped_plan_ids | mapping_summary | network | state
+title | description | raw_entries | assigned_entries | resource_ids | target_ids | mapped_plan_ids | mapping_summary | state
 ```
 
 **矛盾点：**
