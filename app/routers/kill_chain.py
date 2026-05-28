@@ -24,6 +24,7 @@ from app.services.data_server_client import (
     to_frontend_killchain,
     to_frontend_killchain_list,
 )
+from app.services.sichen_client import call_plan_allocation
 
 router = APIRouter()
 
@@ -343,6 +344,144 @@ async def auto_allocate(kill_chain_id: str, entry_id: str, body: AutoAllocateReq
         "entry_id": entry_id,
         "selected_executor": chosen["executor_id"],
         "status": "SUCCEEDED",
+    })
+
+
+@router.post("/kill-chains/{kill_chain_id}/batch-auto-allocate", response_model=ApiResponse)
+async def batch_auto_allocate(kill_chain_id: str, body: Dict[str, Any] = None):
+    """
+    批量自动分配 — 调用 sichen 火力规划小模型。
+    body 可传 {"entry_ids": [...]}，为空则处理所有未分配条目。
+    """
+    kc, rid = _get_kill_chain(kill_chain_id)
+    body = body or {}
+    specified_ids = body.get("entry_ids", [])
+
+    raw_entries = kc.get("raw_entries", [])
+    if specified_ids:
+        target_entries = [e for e in raw_entries if e.get("entry_id") in specified_ids and not e.get("selected_executor")]
+    else:
+        target_entries = [e for e in raw_entries if not e.get("selected_executor")]
+
+    if not target_entries:
+        return ApiResponse(code=200, message="没有需要自动分配的条目", data={"allocations": []})
+
+    # ---------- 1. 收集装备和目标 ----------
+    resource_ids = kc.get("resource_ids", [])
+    target_ids = kc.get("target_ids", [])
+
+    # 装备名称 -> ID 映射
+    name_to_resource: Dict[str, str] = {}
+    vehicles: List[Dict[str, Any]] = []
+    for res_id in resource_ids:
+        res = task_pool.get(res_id)
+        if not res:
+            continue
+        name = res.get("resource_name") or res_id.replace("equipment:", "")
+        name_to_resource[name] = res_id
+        vehicles.append({
+            "vehicle_id": name,
+            "platform_type": "light",
+            "longitude": res.get("location", {}).get("longitude", 118.2),
+            "latitude": res.get("location", {}).get("latitude", 39.86),
+            "ammunition": [{"ammo_type": "FTK", "ammo_count": 10}],
+            "faults": [],
+        })
+
+    # target 短 ID -> 完整 ID 映射
+    short_to_target: Dict[str, str] = {}
+    targets: List[Dict[str, Any]] = []
+    for tid in target_ids:
+        t = task_pool.get(tid)
+        short_id = tid.replace("target:", "")
+        short_to_target[short_id] = tid
+        loc = t.get("location", {}) if t else {}
+        targets.append({
+            "target_id": short_id,
+            "name": t.get("target_name", short_id) if t else short_id,
+            "type": "239",
+            "center_position": {
+                "lat": loc.get("latitude", 39.86),
+                "lon": loc.get("longitude", 118.2),
+            },
+            "object_level": "特级",
+            "threat": 100,
+            "object_requirement_result": "彻底摧毁",
+        })
+
+    # ---------- 2. 调用 sichen ----------
+    sichen_result = call_plan_allocation(vehicles, targets)
+    if not sichen_result:
+        return ApiResponse(code=503, message="sichen 火力规划服务调用失败", data=None)
+
+    vehicle_missions = sichen_result.get("vehicle_missions", {})
+
+    # ---------- 3. 解析分配结果并构建 assigned_entries ----------
+    assigned_entries = list(kc.get("assigned_entries", []))
+    allocations = []
+
+    for v_name, tasks in vehicle_missions.items():
+        res_id = name_to_resource.get(v_name)
+        if not res_id:
+            continue
+        for task in tasks:
+            target_short = task.get("target_id", "")
+            full_tid = short_to_target.get(target_short)
+            if not full_tid:
+                continue
+            # 找一个包含该目标且未分配的 entry（按 operation + target_ids 判断）
+            def _already_allocated(entry):
+                for a in assigned_entries:
+                    if a.get("operation") == entry["operation"] and set(a.get("target_ids", [])) == set(entry.get("target_ids", [])):
+                        return True
+                return False
+
+            match_entry = next(
+                (e for e in target_entries
+                 if full_tid in e.get("target_ids", [])
+                 and not _already_allocated(e)),
+                None
+            )
+            if not match_entry:
+                continue
+
+            assigned = {
+                "entry_id": _new_id("assigned"),
+                "phase": "ASSIGNED",
+                "entry_seq": match_entry["entry_seq"],
+                "target_ids": match_entry["target_ids"],
+                "operation": match_entry["operation"],
+                "executor_options": [{
+                    "executor_id": res_id,
+                    "allocation_count": 1,
+                    "locked": True,
+                    "note": f"sichen自动分配: {v_name} -> {target_short} (毁伤概率 {task.get('damage_probability', 0)})",
+                }],
+                "selected_executor": res_id,
+                "locked": True,
+                "is_valid": True,
+                "notes": f"火力规划分配: 武器={task.get('weapon','FTK')}, 弹药={task.get('planned_ammo',1)}",
+            }
+            assigned_entries.append(assigned)
+            allocations.append({
+                "entry_id": match_entry["entry_id"],
+                "selected_executor": res_id,
+                "vehicle": v_name,
+                "target": target_short,
+                "weapon": task.get("weapon"),
+                "damage_probability": task.get("damage_probability"),
+            })
+
+    # ---------- 4. 更新存储 ----------
+    if allocations:
+        ds_patch_kill_chain(rid, {"assigned_entries": assigned_entries})
+        task_pool.patch(rid, {"assigned_entries": assigned_entries})
+        await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.resource_allocated", task_pool.get(rid) or kc, "批量自动分配完成")
+
+    return ApiResponse(data={
+        "allocations": allocations,
+        "total": len(allocations),
+        "sichen_report": sichen_result.get("report", {}),
     })
 
 
