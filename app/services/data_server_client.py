@@ -199,6 +199,7 @@ def _http_get(path: str, params: Optional[Dict] = None) -> Optional[Dict[str, An
             f"{DATA_SERVER_BASE_URL}{path}",
             params=params,
             timeout=TIMEOUT_SECONDS,
+            proxies={"http": None, "https": None},
         )
         resp.raise_for_status()
         return resp.json()
@@ -214,6 +215,7 @@ def _http_post(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[str
             f"{DATA_SERVER_BASE_URL}{path}",
             json=json_body,
             timeout=TIMEOUT_SECONDS,
+            proxies={"http": None, "https": None},
         )
         resp.raise_for_status()
         return resp.json()
@@ -229,6 +231,7 @@ def _http_patch(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[st
             f"{DATA_SERVER_BASE_URL}{path}",
             json=json_body,
             timeout=TIMEOUT_SECONDS,
+            proxies={"http": None, "https": None},
         )
         resp.raise_for_status()
         return resp.json()
@@ -355,14 +358,27 @@ def delete_kill_chain(resource_id: str) -> bool:
 
 # ========== 前端适配：转换为前端熟悉的数据结构 ==========
 
+def _get_biz_field(data: Dict[str, Any], field: str, default: Any = "") -> Any:
+    """优先从 raw_payload 读取业务字段，fallback 到顶层字段"""
+    return data.get("raw_payload", {}).get(field, data.get(field, default))
+
+
 def to_frontend_killchain(data: Dict[str, Any]) -> Dict[str, Any]:
-    """将数据服务器返回的 KillChain (TaskView) 转换为前端格式"""
+    """将数据服务器返回的 KillChain (TaskView) 转换为前端格式
+
+    注意：数据服务器把业务字段存放在 raw_payload 中，顶层 title 等字段
+    通常是系统生成的标识（如 kill_chain-kill_chain_001），因此优先取
+    raw_payload 内的值。
+
+    KillChain state 合法枚举值：
+        INIT, READY, WAITING, ACTIVE, INTERUPT, DONE, DELETED
+    """
     if not data:
         return {}
 
     # 提取 targets 名称列表（用于前端显示）
     target_names = []
-    for tid in data.get("target_ids", []):
+    for tid in _get_biz_field(data, "target_ids", []):
         # 简化：从 target_id 提取名称
         target_names.append(tid.replace("target_", "目标").replace("target-", "目标"))
 
@@ -370,18 +386,18 @@ def to_frontend_killchain(data: Dict[str, Any]) -> Dict[str, Any]:
     # 前端当前使用 entries（混合），这里保留原始结构
     return {
         "resource_id": data.get("resource_id", ""),
-        "kill_chain_id": data.get("kill_chain_id", ""),
-        "title": data.get("title", ""),
-        "description": data.get("description", ""),
-        "state": data.get("state", "INIT"),
-        "target_ids": data.get("target_ids", []),
+        "kill_chain_id": _get_biz_field(data, "kill_chain_id", ""),
+        "title": _get_biz_field(data, "title", ""),
+        "description": _get_biz_field(data, "description", ""),
+        "state": _get_biz_field(data, "state", "INIT"),
+        "target_ids": _get_biz_field(data, "target_ids", []),
         "target_names": target_names,
-        "resource_ids": data.get("resource_ids", []),
-        "mapped_plan_ids": data.get("mapped_plan_ids", []),
-        "mapping_summary": data.get("mapping_summary", {}),
-        "raw_entries": data.get("raw_entries", []),
-        "assigned_entries": data.get("assigned_entries", []),
-        "network": data.get("network", {"nodes": [], "edges": []}),
+        "resource_ids": _get_biz_field(data, "resource_ids", []),
+        "mapped_plan_ids": _get_biz_field(data, "mapped_plan_ids", []),
+        "mapping_summary": _get_biz_field(data, "mapping_summary", {}),
+        "raw_entries": _get_biz_field(data, "raw_entries", []),
+        "assigned_entries": _get_biz_field(data, "assigned_entries", []),
+        "network": _get_biz_field(data, "network", {"nodes": [], "edges": []}),
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
     }
@@ -391,15 +407,16 @@ def to_frontend_killchain_list(items: List[Dict[str, Any]]) -> List[Dict[str, An
     """列表摘要转换"""
     results = []
     for item in items:
-        target_count = len(item.get("target_ids", []))
-        raw_count = len(item.get("raw_entries", []))
-        assigned_count = len(item.get("assigned_entries", []))
+        target_count = len(_get_biz_field(item, "target_ids", []))
+        raw_count = len(_get_biz_field(item, "raw_entries", []))
+        assigned_count = len(_get_biz_field(item, "assigned_entries", []))
         results.append({
-            "kill_chain_id": item.get("kill_chain_id", ""),
+            "kill_chain_id": _get_biz_field(item, "kill_chain_id", ""),
             "resource_id": item.get("resource_id", ""),
-            "title": item.get("title", ""),
-            "description": item.get("description", ""),
-            "state": item.get("state", "INIT"),
+            "task_type": item.get("task_type", "KILL_CHAIN"),
+            "title": _get_biz_field(item, "title", ""),
+            "description": _get_biz_field(item, "description", ""),
+            "state": _get_biz_field(item, "state", "INIT"),
             "target_count": target_count,
             "entry_count": raw_count + assigned_count,
         })

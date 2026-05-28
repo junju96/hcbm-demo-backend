@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from app.routers import kill_chain, planning
+from app.routers import kill_chain, planning, action_sequence
 from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
 from app.data.mock_data import preload_mock_data
@@ -46,6 +46,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(kill_chain.router, prefix="/api/v1", tags=["杀伤链"])
 app.include_router(planning.router, prefix="/api/v1", tags=["规划事件流"])
+app.include_router(action_sequence.router, prefix="/api/v1", tags=["行动序列"])
 
 
 @app.get("/health")
