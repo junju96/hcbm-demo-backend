@@ -4,6 +4,7 @@
   1. 从数据服务器获取 PLAN / STAGE / ACTION 数据
   2. 将 plan.team_actions 转换为按车辆(vid)组织的行动序列
   3. 维护行动序列的运行状态（内存）
+  4. plan → MissionService mission_data 格式转换
 
 与杀伤链的区分：
   - 杀伤链: data_server_client.py 处理 KILL_CHAIN 类型
@@ -11,8 +12,10 @@
 """
 
 import copy
+import hashlib
+import re
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.services.data_server_client import _http_get, _http_post
 
@@ -72,42 +75,42 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 直接走数据服务器"""
-    data = _http_post(
-        "/api/v1/task_pool/resources/query",
-        {"task_type": "PLAN", "limit": limit},
-    )
+    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN"""
+    data = _http_get("/api/v1/task_pool/resources/by_type/PLAN")
+    items = []
     if data is not None and isinstance(data, list):
-        result = []
-        for item in data:
-            raw = item.get("raw_payload", {}) or {}
-            if not isinstance(raw, dict):
-                raw = {}
-            # title 优先从 tactic.title -> raw_payload.title -> 顶层title -> plan_id
-            tactic = raw.get("tactic") or {}
-            if not isinstance(tactic, dict):
-                tactic = {}
-            title = (
-                tactic.get("title")
-                or raw.get("title")
-                or item.get("title")
-                or raw.get("plan_id", "")
-            )
-            # state 优先从 raw_payload.state -> 顶层state -> DRAFT
-            state = raw.get("state") or item.get("state") or "DRAFT"
-            result.append({
-                "plan_id": raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
-                "resource_id": item.get("resource_id", ""),
-                "title": title,
-                "description": raw.get("description") or item.get("description") or "",
-                "state": state,
-                "teams_count": len(raw.get("teams", [])),
-                "stages_count": len(raw.get("stages", [])),
-            })
-        return result
+        items = data[:limit]
+    elif data is not None and isinstance(data, dict):
+        # 有些接口返回 { items: [...] }
+        items = (data.get("items") or data.get("data") or [])[:limit]
 
-    # 服务器不可达或异常 — 返回空列表
-    return []
+    result = []
+    for item in items:
+        raw = item.get("raw_payload", {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        # title 优先从 tactic.title -> raw_payload.title -> 顶层title -> plan_id
+        tactic = raw.get("tactic") or {}
+        if not isinstance(tactic, dict):
+            tactic = {}
+        title = (
+            tactic.get("title")
+            or raw.get("title")
+            or item.get("title")
+            or raw.get("plan_id", "")
+        )
+        # state 优先从 raw_payload.state -> 顶层state -> DRAFT
+        state = raw.get("state") or item.get("state") or "DRAFT"
+        result.append({
+            "plan_id": raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "resource_id": item.get("resource_id", ""),
+            "title": title,
+            "description": raw.get("description") or item.get("description") or "",
+            "state": state,
+            "teams_count": len(raw.get("teams", [])),
+            "stages_count": len(raw.get("stages", [])),
+        })
+    return result
 
 
 def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
@@ -241,3 +244,307 @@ class ActionSequenceRuntime:
 
 # 全局单例
 action_runtime = ActionSequenceRuntime()
+
+
+# ==================== Plan → MissionService mission_data 转换 ====================
+
+
+def _action_name_to_sid(name: str) -> int:
+    """根据 action 名称关键词推断元任务 sid"""
+    if not name:
+        return 1
+    n = name.lower()
+    if "静默" in n or "值守" in n or "驻守" in n:
+        return 4
+    if "返航" in n or "返回基地" in n or "回基地" in n:
+        return 6
+    if "人工" in n or "保障" in n:
+        return 8
+    if "设置返航点" in n or "返航点" in n:
+        return 5
+    if "跟随" in n:
+        return 2
+    if "编队" in n:
+        return 7
+    if "姿态" in n or "转向" in n:
+        return 9
+    # 默认：自主机动
+    return 1
+
+
+def _build_service_from_action(action: Dict[str, Any]) -> Dict[str, Any]:
+    """将单个 action 转换为 mission_data act.service"""
+    name = action.get("name", "")
+    description = action.get("description", "")
+    param = action.get("param") or {}
+    waypoints = param.get("waypoints") if isinstance(param, dict) else None
+    sid = _action_name_to_sid(name)
+
+    # sid = 1: 自主机动 — 优先使用 waypoints
+    if sid == 1 and waypoints and isinstance(waypoints, list) and len(waypoints) >= 2:
+        points = []
+        for wp in waypoints:
+            if isinstance(wp, dict):
+                points.append({
+                    "lon": int(wp.get("longitude", 0) * 1e6),
+                    "lat": int(wp.get("latitude", 0) * 1e6),
+                    "alt": int((wp.get("altitude", 0) or 0) * 10),
+                    "radius": wp.get("radius", -1),
+                    "type": wp.get("type", 1),
+                })
+        if len(points) >= 2:
+            return {
+                "sid": 1,
+                "points": points,
+                "limited_speed": param.get("limited_speed", 20),
+                "safe_mode": param.get("safe_mode", 0),
+                "loop_mode": param.get("loop_mode", 0),
+            }
+        # waypoints 不足 2 个，fallback 到默认 sid=1（空 points 或占位）
+        return {
+            "sid": 1,
+            "points": [
+                {"lon": 116397128, "lat": 39909231, "alt": 435, "radius": -1, "type": 1},
+                {"lon": 116397500, "lat": 39909500, "alt": 435, "radius": -1, "type": 1},
+            ],
+            "limited_speed": 20,
+            "safe_mode": 0,
+            "loop_mode": 0,
+        }
+
+    # sid = 1 但没有 waypoints — 用描述中的坐标或默认值
+    if sid == 1:
+        # 尝试从 description 提取坐标（简易正则）
+        coords = re.findall(r"([\d.]+)[°\s]*([NSns])?[,\s]*([\d.]+)[°\s]*([EWew])?", description)
+        points = []
+        for m in coords:
+            try:
+                lat = float(m[0])
+                lon = float(m[2])
+                if m[1] and m[1].upper() == "S":
+                    lat = -lat
+                if m[3] and m[3].upper() == "W":
+                    lon = -lon
+                points.append({"lon": int(lon * 1e6), "lat": int(lat * 1e6), "alt": 435, "radius": -1, "type": 1})
+            except Exception:
+                pass
+        if len(points) >= 2:
+            return {"sid": 1, "points": points, "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
+        # 默认占位点
+        return {
+            "sid": 1,
+            "points": [
+                {"lon": 116397128, "lat": 39909231, "alt": 435, "radius": -1, "type": 1},
+                {"lon": 116397500, "lat": 39909500, "alt": 435, "radius": -1, "type": 1},
+            ],
+            "limited_speed": 20,
+            "safe_mode": 0,
+            "loop_mode": 0,
+        }
+
+    if sid == 4:
+        return {"sid": 4, "time": param.get("time", 20)}
+
+    if sid == 5:
+        return {"sid": 5}
+
+    if sid == 6:
+        return {"sid": 6}
+
+    if sid == 2:
+        return {
+            "sid": 2,
+            "x": param.get("x", 960),
+            "y": param.get("y", 540),
+            "width": param.get("width", 1920),
+            "height": param.get("height", 1080),
+            "limited_speed": param.get("limited_speed", 15),
+            "safe_mode": param.get("safe_mode", 0),
+            "strategy": param.get("strategy", 0),
+        }
+
+    if sid == 7:
+        return {
+            "sid": 7,
+            "points": param.get("points", []),
+            "limited_speed": param.get("limited_speed", 20),
+            "formation_mode": param.get("formation_mode", 0),
+            "safe_mode": param.get("safe_mode", 0),
+        }
+
+    if sid == 9:
+        return {
+            "sid": 9,
+            "pose": param.get("pose", [9000, 0, 0]),
+            "pose_deviation": param.get("pose_deviation", [100, 100, 100]),
+            "limited_speed": param.get("limited_speed", 10),
+            "safe_mode": param.get("safe_mode", 0),
+        }
+
+    if sid == 8:
+        return {"sid": 8, "type": param.get("type", 1)}
+
+    # 兜底
+    return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
+
+
+def build_mission_data(
+    plan: Dict[str, Any],
+    vehicle_vmfs: Optional[Dict[str, int]] = None,
+    vehicle_ips: Optional[Dict[str, str]] = None,
+    tid: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    将 plan 转换为 MissionService 的 mission_data 格式。
+
+    Args:
+        plan: 方案详情 dict（含 stages / team_actions 或 vehicle_summary）
+        vehicle_vmfs: vid -> vmf 数字编号 映射，例如 {"无人车A": 99076716}
+        vehicle_ips: vid -> IP 映射，例如 {"无人车A": "192.168.1.11"}
+        tid: 任务编号，默认用 plan_id 哈希
+
+    Returns:
+        {"task": {...}} 结构，可直接放入 payload.args.mission_data
+    """
+    plan_id = plan.get("plan_id", "")
+    title = plan.get("title", "")
+
+    # 生成 tid
+    if tid is None:
+        # 尝试从 plan_id 提取数字，否则哈希
+        nums = re.findall(r"\d+", plan_id)
+        if nums:
+            tid = int("".join(nums)[:10]) or 10001
+        else:
+            h = hashlib.md5(plan_id.encode()).hexdigest()[:8]
+            tid = int(h, 16) % 90000000 + 10000000
+
+    # 时间
+    now = datetime.now(timezone.utc)
+    start_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    end_str = (now + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 提取所有车辆 actions
+    # 兼容两种数据结构：
+    #   1) plan.stages[].team_actions{team_id: [{vid, actions}]}
+    #   2) plan.vehicle_summary[].stages[].actions
+    vehicle_actions_map: Dict[str, List[Dict[str, Any]]] = {}
+
+    stages = plan.get("stages", [])
+    for stage in stages:
+        team_actions = stage.get("team_actions", {})
+        if isinstance(team_actions, dict):
+            for team_id, vehicles in team_actions.items():
+                for vehicle in vehicles:
+                    vid = vehicle.get("vid", "")
+                    actions = vehicle.get("actions", [])
+                    if vid and actions:
+                        if vid not in vehicle_actions_map:
+                            vehicle_actions_map[vid] = []
+                        vehicle_actions_map[vid].extend(actions)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                team_id = ta.get("team_id", "")
+                vehicles = ta.get("team_actions", [])
+                for vehicle in vehicles:
+                    vid = vehicle.get("vid", "")
+                    actions = vehicle.get("actions", [])
+                    if vid and actions:
+                        if vid not in vehicle_actions_map:
+                            vehicle_actions_map[vid] = []
+                        vehicle_actions_map[vid].extend(actions)
+
+    # 也兼容 vehicle_summary 结构
+    vehicle_summary = plan.get("vehicle_summary", [])
+    for vsum in vehicle_summary:
+        vid = vsum.get("vid", "")
+        for stage in vsum.get("stages", []):
+            actions = stage.get("actions", [])
+            if vid and actions:
+                if vid not in vehicle_actions_map:
+                    vehicle_actions_map[vid] = []
+                vehicle_actions_map[vid].extend(actions)
+
+    # 去重并排序（按 action_seq）
+    for vid in vehicle_actions_map:
+        seen = set()
+        uniq = []
+        for a in vehicle_actions_map[vid]:
+            aid = a.get("action_id", a.get("action_seq", id(a)))
+            if aid not in seen:
+                seen.add(aid)
+                uniq.append(a)
+        uniq.sort(key=lambda x: x.get("action_seq", 0))
+        vehicle_actions_map[vid] = uniq
+
+    # 构建 vehicles
+    mission_vehicles = []
+    for vid, actions in vehicle_actions_map.items():
+        vmf = (vehicle_vmfs or {}).get(vid)
+        if vmf is None:
+            # 尝试 vid 本身就是数字
+            try:
+                vmf = int(vid)
+            except (ValueError, TypeError):
+                vmf = 99076716  # 兜底：ZD04 的示例 vmf
+
+        vip = (vehicle_ips or {}).get(vid, "192.168.1.11")
+        num = len(actions)
+
+        acts = []
+        for idx, action in enumerate(actions, start=1):
+            service = _build_service_from_action(action)
+            act = {
+                "aid": idx,
+                "num": num,
+                "vid": [vmf],
+                "vip": [vip],
+                "strategy": 2,
+                "start": start_str,
+                "end": end_str,
+                "premise": list(range(1, idx)),  # 前置为前面所有 action
+                "endwith": -1,
+                "level": 0,
+                "service": service,
+            }
+            acts.append(act)
+
+        mission_vehicles.append({
+            "vid": vmf,
+            "cnt": f"{vid}任务",
+            "acts": acts,
+        })
+
+    mission_data = {
+        "task": {
+            "tid": tid,
+            "type": 0,
+            "cnt": title or f"任务{plan_id}",
+            "start": start_str,
+            "end": end_str,
+            "vehicles": mission_vehicles,
+        }
+    }
+    return mission_data
+
+
+def build_mission_payload(
+    plan: Dict[str, Any],
+    vehicle_vmfs: Optional[Dict[str, int]] = None,
+    vehicle_ips: Optional[Dict[str, str]] = None,
+    tid: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    构建完整的 MissionService send_mission payload。
+
+    Returns:
+        {"service": "MissionService", "action": "send_mission", "args": {"mission_data": {...}}}
+    """
+    mission_data = build_mission_data(plan, vehicle_vmfs, vehicle_ips, tid)
+    return {
+        "service": "MissionService",
+        "action": "send_mission",
+        "args": {
+            "mission_data": mission_data,
+        },
+    }

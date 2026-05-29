@@ -102,7 +102,7 @@ class AutoAllocateRequest(BaseModel):
 
 
 class GeneratePlanRequest(BaseModel):
-    selected_entry_ids: List[str]
+    selected_entry_ids: List[str] = Field(default_factory=list)
     plan_config: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -159,7 +159,7 @@ class PlanCreate(BaseModel):
     teams: List[Team] = []
     targets: List[TargetAbstract] = []
     stages: List[Stage] = []
-    state: str = "DRAFT_EDITING"
+    state: str = "DRAFT"
 
 
 # ========== SSL 地图数据 ==========

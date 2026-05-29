@@ -24,6 +24,9 @@ from app.services.data_server_client import (
     delete_kill_chain as ds_delete_kill_chain,
     to_frontend_killchain,
     to_frontend_killchain_list,
+    validate_resource_state,
+    VALID_RESOURCE_STATES,
+    _http_post,
 )
 from app.services.sichen_client import call_plan_allocation
 
@@ -550,9 +553,13 @@ async def generate_plan(kill_chain_id: str, body: GeneratePlanRequest):
     """生成行动方案"""
     kc, rid = _get_kill_chain(kill_chain_id)
 
-    # 过滤已分配条目
+    # 过滤已分配条目（未传 selected_entry_ids 时默认使用全部已分配条目）
     assigned = kc.get("assigned_entries", [])
-    selected = [e for e in assigned if e.get("entry_id") in body.selected_entry_ids]
+    entry_ids = body.selected_entry_ids or []
+    if entry_ids:
+        selected = [e for e in assigned if e.get("entry_id") in entry_ids]
+    else:
+        selected = assigned
 
     # mock 生成方案
     plan_id = _new_id("plan")
@@ -587,7 +594,7 @@ async def generate_plan(kill_chain_id: str, body: GeneratePlanRequest):
         "plan_id": plan_id,
         "title": body.plan_config.get("title", "杀伤链映射行动方案"),
         "description": body.plan_config.get("description", f"由 {rid} 映射生成的行动方案"),
-        "state": "DRAFT_EDITING",
+        "state": "DRAFT",
         "attributes": {"plan_type": "KILL_CHAIN_GENERATED", "source_kill_chain_id": rid},
         "relations": [{"type": "generated_from", "target": rid, "metadata": {}}],
         "connections": [{"connection_type": "KILL_CHAIN", "connection_data": [rid]}],
@@ -608,39 +615,44 @@ async def generate_plan(kill_chain_id: str, body: GeneratePlanRequest):
         "updated_at": now,
     }
 
+    # 0. 校验 plan state 合法性（避免数据服务器 500）
+    is_valid, err_msg = validate_resource_state(plan)
+    if not is_valid:
+        return ApiResponse(code=400, message=f"生成的方案 state 不合法: {err_msg}", data=None)
+
+    # 1. 将生成的方案通过数据服务器 import 接口存入
+    import_result = _http_post(
+        "/api/v1/task_pool/ingestion/import",
+        {"resources": [plan], "return_data_type": "typed", "ignore_errors": True},
+    )
+    # 无论数据服务器是否成功，都写入本地内存（数据服务器 PLAN 查询 500 时可作为 fallback）
     task_pool.set(plan_rid, plan)
 
-    # 更新杀伤链的映射关系
-    mapped_plan_ids = kc.get("mapped_plan_ids", []) + [plan_rid]
-    mapping_summary = {
-        "total_raw_entries": len(kc.get("raw_entries", [])),
-        "total_assigned_entries": len(assigned),
-        "target_count": len(kc.get("target_ids", [])),
-        "resource_count": len(kc.get("resource_ids", [])),
-        "generated_plan_resource_id": plan_rid,
-    }
-    updated_kc = ds_patch_kill_chain(rid, {
-        "mapped_plan_ids": mapped_plan_ids,
-        "mapping_summary": mapping_summary,
-    })
-    task_pool.patch(rid, {
-        "mapped_plan_ids": mapped_plan_ids,
-        "mapping_summary": mapping_summary,
-    })
+    # 2. 删除原杀伤链（调用数据服务器 lifecycle 接口）
+    delete_ok = ds_delete_kill_chain(rid)
+    if delete_ok:
+        task_pool.update_lifecycle(rid, "DELETED", "mapped_to_plan")
 
     # SSE 推送
-    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.plan_generated", updated_kc, "方案生成完成")
     await sse_manager.push_overview_changed(
         "planning_home", "PLAN", plan_rid,
         summary={"title": plan["title"], "state": plan["state"]},
         action="CREATE",
     )
+    if delete_ok:
+        await sse_manager.push_overview_changed(
+            "planning_home", "KILL_CHAIN", rid,
+            summary={"title": kc.get("title", ""), "state": "DELETED"},
+            action="DELETE",
+        )
 
     return ApiResponse(data={
         "plan_id": plan_rid,
         "kill_chain_id": kill_chain_id,
         "status": "SUCCEEDED",
-        "message": "方案生成完成",
+        "message": "方案已生成并映射到数据服务器",
+        "imported": import_result is not None,
+        "deleted": delete_ok,
     })
 
 

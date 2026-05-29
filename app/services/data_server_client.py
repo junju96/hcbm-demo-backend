@@ -21,6 +21,25 @@ DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
 TIMEOUT_SECONDS = 5
 MOCK_MODE = True  # True 时数据服务器不可达也返回 fake data
 
+# 数据服务器接受的资源 state 合法值（PLAN / KILL_CHAIN 等通用）
+VALID_RESOURCE_STATES = {
+    "INIT", "READY", "WAITING", "ACTIVE", "INTERUPT",
+    "DONE", "DELETED", "REVIEW", "DRAFT",
+}
+
+
+def validate_resource_state(resource: Dict[str, Any]) -> tuple[bool, str]:
+    """校验资源 state 字段合法性，返回 (is_valid, error_message)"""
+    state = resource.get("state")
+    if state is None:
+        return True, ""  # state 可选
+    if state not in VALID_RESOURCE_STATES:
+        return False, (
+            f"非法 state '{state}'，合法值: "
+            f"{', '.join(sorted(VALID_RESOURCE_STATES))}"
+        )
+    return True, ""
+
 
 # ========== Fake Response 数据（来自 test.py） ==========
 

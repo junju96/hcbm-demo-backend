@@ -339,7 +339,7 @@ def preload_mock_data(task_pool):
         "plan_id": "plan-ssl-demo-001",
         "title": "杀伤链映射行动方案",
         "description": "由 kill_chain:kc-ssl-demo-001 映射生成的行动方案。",
-        "state": "DRAFT_EDITING",
+        "state": "DRAFT",
         "attributes": {"plan_type": "KILL_CHAIN_GENERATED", "source_kill_chain_id": "kill_chain:kc-ssl-demo-001"},
         "relations": [{"type": "generated_from", "target": "kill_chain:kc-ssl-demo-001", "metadata": {}}],
         "connections": [{"connection_type": "KILL_CHAIN", "connection_data": ["kill_chain:kc-ssl-demo-001"]}],
@@ -421,7 +421,7 @@ def preload_mock_data(task_pool):
         "plan_id": "plan-demo-002",
         "title": "雷达站侦察打击行动方案",
         "description": "由 kill_chain:kc-demo-002 映射生成的行动方案。",
-        "state": "DRAFT_EDITING",
+        "state": "DRAFT",
         "teams": [
             {"task_type": "TEAM", "team_id": "team-recon-2", "name": "侦察打击组", "plan_id": "plan-demo-002", "description": "无人车A侦察 + 无人车B打击", "equipment": ["equipment:vehicle-A", "equipment:vehicle-B"], "state": "READY"},
         ],
@@ -443,7 +443,7 @@ def preload_mock_data(task_pool):
         "plan_id": "plan-demo-003",
         "title": "通信枢纽干扰行动方案",
         "description": "由 kill_chain:kc-demo-003 映射生成的行动方案。",
-        "state": "DRAFT_EDITING",
+        "state": "DRAFT",
         "teams": [
             {"task_type": "TEAM", "team_id": "team-jam-3", "name": "干扰评估组", "plan_id": "plan-demo-003", "description": "无人车A执行侦察干扰评估", "equipment": ["equipment:vehicle-A"], "state": "READY"},
         ],

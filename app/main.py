@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager
 import time
 import json
 
-from app.routers import kill_chain, planning, action_sequence, ssl
+from app.routers import kill_chain, planning, action_sequence, ssl, zenoh as zenoh_router
 from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
+from app.services import zenoh_client
 from app.data.mock_data import preload_mock_data
 
 
@@ -22,10 +23,21 @@ async def lifespan(app: FastAPI):
     preload_mock_data(task_pool)
     app.state.task_pool = task_pool
     app.state.sse_manager = sse_manager
+
+    # 初始化 zenoh（local_peer_fallback 允许无 router 时本地回退）
+    zenoh_ok = zenoh_client.initialize(auto_subscribe_defaults=True)
+    if zenoh_ok:
+        print("[ZK Backend] Zenoh ready.")
+        # 自动订阅默认车辆 ZD04 的 MissionService 反馈
+        zenoh_client.subscribe_vehicle_feedbacks("ZD04")
+    else:
+        print(f"[ZK Backend] Zenoh init failed (may fall back to local-peer): {zenoh_client.get_last_zenoh_error()}")
+
     print("[ZK Backend] Mock data loaded. Ready.")
     yield
     # 关闭时清理
     sse_manager.close_all()
+    zenoh_client.close()
     print("[ZK Backend] Shutting down.")
 
 
@@ -134,6 +146,7 @@ app.include_router(kill_chain.router, prefix="/api/v1", tags=["杀伤链"])
 app.include_router(planning.router, prefix="/api/v1", tags=["规划事件流"])
 app.include_router(action_sequence.router, prefix="/api/v1", tags=["行动序列"])
 app.include_router(ssl.router, prefix="/api/v1", tags=["SSL地图数据"])
+app.include_router(zenoh_router.router, prefix="/api/v1", tags=["Zenoh"])
 
 
 @app.get("/health")
