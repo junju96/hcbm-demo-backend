@@ -85,6 +85,16 @@ class ResourceAllocate(BaseModel):
     reason: str = ""
 
 
+class KillChainDispatchEntry(BaseModel):
+    entry_id: str
+    selected_executor: Optional[str] = None
+    executor_assignments: List[Dict[str, Any]] = []
+
+
+class KillChainDispatchRequest(BaseModel):
+    entries: List[KillChainDispatchEntry] = []
+
+
 class AutoAllocateRequest(BaseModel):
     operation: str
     target_ids: List[str]
@@ -150,6 +160,24 @@ class PlanCreate(BaseModel):
     targets: List[TargetAbstract] = []
     stages: List[Stage] = []
     state: str = "DRAFT_EDITING"
+
+
+# ========== SSL 地图数据 ==========
+
+class SSLMapObject(BaseModel):
+    order: int
+    object_id: str
+    object_type: str
+    name: str
+    lon: float
+    lat: float
+    properties: Dict[str, Any] = {}
+
+
+class SSLMapDataRequest(BaseModel):
+    method: List[str] = []
+    resource_list: List[List[str]] = []
+    object_list: List[SSLMapObject] = []
 
 
 # ========== SSE 事件 ==========

@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 from app.models.schemas import (
     KillChainCreate, KillChainUpdate, KillChainEntryCreate,
     ResourceAllocate, AutoAllocateRequest, GeneratePlanRequest,
+    KillChainDispatchRequest,
     ResourceQuery, ApiResponse,
 )
 from app.services.task_pool import task_pool
@@ -314,7 +315,7 @@ async def auto_allocate(kill_chain_id: str, entry_id: str, body: AutoAllocateReq
 
     # 构建 assigned entry
     assigned_entry = {
-        "entry_id": _new_id("assigned"),
+        "entry_id": entry_id,
         "phase": "ASSIGNED",
         "entry_seq": entry["entry_seq"],
         "target_ids": entry["target_ids"],
@@ -331,7 +332,10 @@ async def auto_allocate(kill_chain_id: str, entry_id: str, body: AutoAllocateReq
         "notes": "自动分配完成",
     }
 
-    assigned_entries = kc.get("assigned_entries", []) + [assigned_entry]
+    # 替换已有同 entry_id 的分配记录，而非追加
+    prev_assigned = kc.get("assigned_entries", [])
+    assigned_entries = [e for e in prev_assigned if e.get("entry_id") != entry_id] + [assigned_entry]
+
     # 调用数据服务器 PATCH
     updated = ds_patch_kill_chain(rid, {"assigned_entries": assigned_entries})
     task_pool.patch(rid, {"assigned_entries": assigned_entries})
@@ -446,7 +450,7 @@ async def batch_auto_allocate(kill_chain_id: str, body: Dict[str, Any] = None):
                 continue
 
             assigned = {
-                "entry_id": _new_id("assigned"),
+                "entry_id": match_entry["entry_id"],
                 "phase": "ASSIGNED",
                 "entry_seq": match_entry["entry_seq"],
                 "target_ids": match_entry["target_ids"],
@@ -462,7 +466,8 @@ async def batch_auto_allocate(kill_chain_id: str, body: Dict[str, Any] = None):
                 "is_valid": True,
                 "notes": f"火力规划分配: 武器={task.get('weapon','FTK')}, 弹药={task.get('planned_ammo',1)}",
             }
-            assigned_entries.append(assigned)
+            # 替换已有同 entry_id 的分配记录
+            assigned_entries = [e for e in assigned_entries if e.get("entry_id") != match_entry["entry_id"]] + [assigned]
             allocations.append({
                 "entry_id": match_entry["entry_id"],
                 "selected_executor": res_id,
@@ -495,7 +500,7 @@ async def manual_allocate(kill_chain_id: str, entry_id: str, body: ResourceAlloc
     resource_name = res.get("resource_name", body.selected_executor) if res else body.selected_executor
 
     assigned_entry = {
-        "entry_id": _new_id("assigned"),
+        "entry_id": entry_id,
         "phase": "ASSIGNED",
         "entry_seq": 0,
         "target_ids": [],
@@ -520,7 +525,10 @@ async def manual_allocate(kill_chain_id: str, entry_id: str, body: ResourceAlloc
         assigned_entry["target_ids"] = raw_entry["target_ids"]
         assigned_entry["operation"] = raw_entry["operation"]
 
-    assigned_entries = kc.get("assigned_entries", []) + [assigned_entry]
+    # 替换已有同 entry_id 的分配记录，而非追加
+    prev_assigned = kc.get("assigned_entries", [])
+    assigned_entries = [e for e in prev_assigned if e.get("entry_id") != entry_id] + [assigned_entry]
+
     # 调用数据服务器 PATCH
     updated = ds_patch_kill_chain(rid, {"assigned_entries": assigned_entries})
     task_pool.patch(rid, {"assigned_entries": assigned_entries})
@@ -676,6 +684,69 @@ async def deactivate_kill_chain(kill_chain_id: str):
     return ApiResponse(data={"kill_chain_id": kill_chain_id, "status": "DEACTIVATED", "message": "杀伤链已静默，资源状态同步暂停"})
 
 
+@router.post("/kill-chains/{kill_chain_id}/dispatch", response_model=ApiResponse)
+async def dispatch_kill_chain(kill_chain_id: str, body: KillChainDispatchRequest):
+    """下发杀伤链分配方案：接收前端本地编辑后的分配信息，更新 assigned_entries 并存入数据服务器"""
+    kc, rid = _get_kill_chain(kill_chain_id)
+
+    raw_entries = kc.get("raw_entries", [])
+    prev_assigned = kc.get("assigned_entries", [])
+    modified_ids = set()
+    new_assigned = []
+
+    for item in body.entries:
+        entry_id = item.entry_id
+        raw_entry = next((e for e in raw_entries if e.get("entry_id") == entry_id), None)
+        if not raw_entry:
+            continue
+
+        selected_executor = item.selected_executor
+        executor_assignments = item.executor_assignments or []
+
+        if not selected_executor:
+            # 空分配：跳过（表示取消分配）
+            modified_ids.add(entry_id)
+            continue
+
+        # 构建 assigned_entry
+        assigned_entry = {
+            "entry_id": entry_id,
+            "phase": "ASSIGNED",
+            "entry_seq": raw_entry.get("entry_seq", 0),
+            "target_ids": raw_entry.get("target_ids", []),
+            "operation": raw_entry.get("operation", ""),
+            "executor_options": [{
+                "executor_id": selected_executor,
+                "allocation_count": 1,
+                "locked": True,
+                "note": f"人工分配选中{selected_executor}",
+            }],
+            "selected_executor": selected_executor,
+            "locked": True,
+            "is_valid": True,
+            "notes": "人工分配下发",
+        }
+        new_assigned.append(assigned_entry)
+        modified_ids.add(entry_id)
+
+    # 保留未被修改的旧 assigned_entries，加上新的
+    final_assigned = [e for e in prev_assigned if e.get("entry_id") not in modified_ids] + new_assigned
+
+    ds_patch_kill_chain(rid, {"assigned_entries": final_assigned})
+    task_pool.patch(rid, {"assigned_entries": final_assigned})
+
+    await sse_manager.push_kill_chain_detail(rid, "planning.kill_chain.dispatched", task_pool.get(rid) or kc, "杀伤链分配方案已下发")
+
+    # TODO: 发送给无人车
+
+    return ApiResponse(data={
+        "kill_chain_id": kill_chain_id,
+        "dispatched": len(new_assigned),
+        "status": "DISPATCHED",
+        "message": "杀伤链分配方案已下发",
+    })
+
+
 @router.post("/decision/kill-chain-remapping", response_model=ApiResponse)
 async def kill_chain_remapping(body: Dict[str, Any]):
     """杀伤链重映射"""
@@ -730,13 +801,37 @@ async def kill_chain_remapping(body: Dict[str, Any]):
 
 @router.post("/task_pool/resources/query", response_model=ApiResponse)
 async def task_pool_query(body: Dict[str, Any]):
-    """查询 task_pool 资源 —— 杀伤链类型调用数据服务器（或 mock fallback）"""
+    """查询 task_pool 资源 —— 优先数据服务器，空结果 fallback 本地内存"""
     task_type = body.get("task_type")
+    limit = body.get("limit", 50)
 
-    # 杀伤链类型：调用数据服务器
+    # KILL_CHAIN 类型：合并数据服务器 + 本地 mock
     if task_type == "KILL_CHAIN":
-        items = ds_query_kill_chains(limit=body.get("limit", 20))
-        return ApiResponse(data={"items": to_frontend_killchain_list(items), "total": len(items)})
+        ds_items = ds_query_kill_chains(limit=limit) or []
+        local_items = task_pool.query(task_type="KILL_CHAIN", limit=limit)
+        # 去重：以 kill_chain_id 为键，本地 mock 优先覆盖
+        merged = {}
+        for item in ds_items:
+            kcid = item.get("kill_chain_id") or item.get("resource_id", "")
+            merged[kcid] = item
+        for item in local_items:
+            kcid = item.get("kill_chain_id") or item.get("resource_id", "")
+            merged[kcid] = item
+        return ApiResponse(data={"items": to_frontend_killchain_list(list(merged.values())), "total": len(merged)})
+
+    # PLAN 类型：从本地内存查询并适配为前端格式
+    if task_type == "PLAN":
+        local_items = task_pool.query(task_type="PLAN", limit=limit)
+        adapted = []
+        for item in local_items:
+            adapted.append({
+                "resource_id": item.get("resource_id", ""),
+                "resource_name": item.get("title", ""),
+                "task_type": "PLAN",
+                "state": item.get("state", "DRAFT"),
+                "resource_detail": item,
+            })
+        return ApiResponse(data={"items": adapted, "total": len(adapted)})
 
     # 其他类型：使用本地内存
     results = task_pool.query(
@@ -745,7 +840,7 @@ async def task_pool_query(body: Dict[str, Any]):
         parent_resource_id=body.get("plan_id") or body.get("parent_resource_id"),
         keyword=body.get("keyword"),
         include_deleted=body.get("include_deleted", False),
-        limit=body.get("limit", 50),
+        limit=limit,
     )
     return ApiResponse(data={"items": results, "total": len(results)})
 

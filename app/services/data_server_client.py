@@ -194,48 +194,47 @@ _killchain_store: Dict[str, Dict[str, Any]] = {
 def _http_get(path: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
+    url = f"{DATA_SERVER_BASE_URL}{path}"
     try:
-        resp = requests.get(
-            f"{DATA_SERVER_BASE_URL}{path}",
-            params=params,
-            timeout=TIMEOUT_SECONDS,
-            proxies={"http": None, "https": None},
-        )
+        print(f"[DS-OUT] GET  {url} | params={params}")
+        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        print(f"[DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except Exception as e:
+        print(f"[DS-ERR] GET  {url} | error={e}")
         return None
 
 
 def _http_post(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
+    url = f"{DATA_SERVER_BASE_URL}{path}"
+    body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     try:
-        resp = requests.post(
-            f"{DATA_SERVER_BASE_URL}{path}",
-            json=json_body,
-            timeout=TIMEOUT_SECONDS,
-            proxies={"http": None, "https": None},
-        )
+        print(f"[DS-OUT] POST {url} | body={body_summary}")
+        resp = requests.post(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except Exception as e:
+        print(f"[DS-ERR] POST {url} | error={e}")
         return None
 
 
 def _http_patch(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
+    url = f"{DATA_SERVER_BASE_URL}{path}"
+    body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     try:
-        resp = requests.patch(
-            f"{DATA_SERVER_BASE_URL}{path}",
-            json=json_body,
-            timeout=TIMEOUT_SECONDS,
-            proxies={"http": None, "https": None},
-        )
+        print(f"[DS-OUT] PATCH {url} | body={body_summary}")
+        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        print(f"[DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except Exception as e:
+        print(f"[DS-ERR] PATCH {url} | error={e}")
         return None
 
 
@@ -398,6 +397,7 @@ def to_frontend_killchain(data: Dict[str, Any]) -> Dict[str, Any]:
         "raw_entries": _get_biz_field(data, "raw_entries", []),
         "assigned_entries": _get_biz_field(data, "assigned_entries", []),
         "network": _get_biz_field(data, "network", {"nodes": [], "edges": []}),
+        "is_mock": _get_biz_field(data, "is_mock", False),
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
     }
@@ -419,5 +419,6 @@ def to_frontend_killchain_list(items: List[Dict[str, Any]]) -> List[Dict[str, An
             "state": _get_biz_field(item, "state", "INIT"),
             "target_count": target_count,
             "entry_count": raw_count + assigned_count,
+            "is_mock": _get_biz_field(item, "is_mock", False),
         })
     return results

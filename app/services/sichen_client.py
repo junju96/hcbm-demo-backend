@@ -60,14 +60,13 @@ def call_plan_allocation(
         "weights": [0.6, 0.2, 0.2],
     }
 
+    url = f"{SICHEN_BASE_URL}/plan"
     try:
-        resp = requests.post(
-            f"{SICHEN_BASE_URL}/plan",
-            json=payload,
-            timeout=15,
-            proxies={"http": None, "https": None},
-        )
+        print(f"[SICHEN-OUT] POST {url} | vehicles={len(vehicles)} targets={len(targets)}")
+        resp = requests.post(url, json=payload, timeout=15, proxies={"http": None, "https": None})
+        print(f"[SICHEN-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except Exception as e:
+        print(f"[SICHEN-ERR] POST {url} | error={e}")
         return None
