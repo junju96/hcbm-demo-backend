@@ -24,8 +24,13 @@ from app.models.schemas import ApiResponse
 from app.services.action_sequence_client import (
     query_plans,
     get_plan_detail,
+    get_first_vid,
     action_runtime,
     build_mission_payload,
+    publish_control_mission,
+    query_plans_operator,
+    get_plan_detail_operator,
+    import_plan_to_operator,
 )
 from app.services import zenoh_client
 
@@ -55,29 +60,53 @@ async def get_plan(plan_id: str):
 
 @router.post("/action-sequences/plans/{plan_id}/start", response_model=ApiResponse)
 async def start_plan(plan_id: str):
-    """开始执行行动序列"""
+    """开始执行行动序列 — 状态转移 + Zenoh control_mission (task_control=1)"""
     ok, msg = action_runtime.transit(plan_id, "ACTIVE")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    return ApiResponse(data={"plan_id": plan_id, "action": "start", "state": "ACTIVE", "message": msg})
+
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "start",
+        "state": "ACTIVE",
+        "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
 
 
 @router.post("/action-sequences/plans/{plan_id}/pause", response_model=ApiResponse)
 async def pause_plan(plan_id: str):
-    """暂停执行行动序列"""
+    """暂停执行行动序列 — 状态转移 + Zenoh control_mission (task_control=2)"""
     ok, msg = action_runtime.transit(plan_id, "PAUSED")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    return ApiResponse(data={"plan_id": plan_id, "action": "pause", "state": "PAUSED", "message": msg})
+
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=2)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "pause",
+        "state": "PAUSED",
+        "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
 
 
 @router.post("/action-sequences/plans/{plan_id}/resume", response_model=ApiResponse)
 async def resume_plan(plan_id: str):
-    """继续执行行动序列"""
+    """继续执行行动序列 — 状态转移 + Zenoh control_mission (task_control=3)"""
     ok, msg = action_runtime.transit(plan_id, "ACTIVE")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    return ApiResponse(data={"plan_id": plan_id, "action": "resume", "state": "ACTIVE", "message": msg})
+
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=3)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "resume",
+        "state": "ACTIVE",
+        "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
 
 
 class DispatchRequest(BaseModel):
@@ -89,67 +118,163 @@ class DispatchRequest(BaseModel):
 
 @router.post("/action-sequences/plans/{plan_id}/stop", response_model=ApiResponse)
 async def stop_plan(plan_id: str):
-    """停止/重置行动序列"""
+    """停止/重置行动序列 — 状态重置 + Zenoh control_mission (task_control=4)"""
     action_runtime.reset(plan_id)
-    return ApiResponse(data={"plan_id": plan_id, "action": "stop", "state": "SCHEDULED", "message": "行动序列已停止并重置"})
+
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=4)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "stop",
+        "state": "SCHEDULED",
+        "message": "行动序列已停止并重置",
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
 
 
 @router.post("/action-sequences/plans/{plan_id}/dispatch", response_model=ApiResponse)
 async def dispatch_plan(plan_id: str, body: DispatchRequest):
     """
-    下发行动序列到无人车（通过 Zenoh 发送 MissionService/send_mission）。
+    协同席 — 将行动方案下发到操控席数据服务端（POST /ingestion/import）。
+    """
+    plan = get_plan_detail(plan_id)
+    if not plan:
+        return ApiResponse(code=404, message="Plan not found", data=None)
 
-    请求体可选字段：
-      - vehicle_vmfs: {"无人车A": 99076716, ...}  — vid 到 vmf 数字编号映射
-      - vehicle_ips:  {"无人车A": "192.168.1.11", ...}  — vid 到 IP 映射
-      - tid: 任务编号，默认从 plan_id 推导
-      - vehicle_topic: 目标车辆 topic 后缀，默认 ZD04
+    # 从 plan 详情中重建完整的资源对象用于 import
+    plan_resource = {
+        "resource_id": plan.get("resource_id") or f"plan:{plan_id}",
+        "task_type": "PLAN",
+        "plan_id": plan_id,
+        "title": plan.get("title", ""),
+        "description": plan.get("description", ""),
+        "state": plan.get("state") or "DRAFT",
+        "teams": plan.get("teams", []),
+        "targets": plan.get("targets", []),
+        "stages": plan.get("stages", []),
+    }
+
+    result = import_plan_to_operator(plan_resource)
+    if result is None:
+        return ApiResponse(code=500, message="下发到操控席数据服务端失败", data=None)
+
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "dispatch_to_operator",
+        "imported": True,
+        "message": "行动方案已下发到操控席数据服务端",
+    })
+
+
+# ========== 操控端行动序列专用接口 ==========
+
+@router.get("/action-sequences/operator/plans", response_model=ApiResponse)
+async def list_plans_operator(limit: int = 20):
+    """操控端 — 从操控席数据服务端获取行动方案列表"""
+    items = query_plans_operator(limit=limit)
+    return ApiResponse(data={"items": items, "total": len(items)})
+
+
+@router.get("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
+async def get_plan_operator(plan_id: str):
+    """操控端 — 从操控席数据服务端获取方案详情"""
+    detail = get_plan_detail_operator(plan_id)
+    if not detail:
+        return ApiResponse(code=404, message="Plan not found", data=None)
+    runtime = action_runtime.get_state(detail.get("plan_id", plan_id))
+    detail["runtime_state"] = runtime
+    return ApiResponse(data=detail)
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/dispatch", response_model=ApiResponse)
+async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
+    """
+    操控端 — 通过 Zenoh 发送 MissionService/send_mission 到无人车。
+    vehicle 从请求体取（默认 ZD04），mission_data 由 plan 详情拼装。
     """
     import json
 
-    print(f"\n[DISPATCH] ====== 行动序列下发开始 ======")
-    print(f"[DISPATCH] plan_id={plan_id}")
-    print(f"[DISPATCH] request_body={body.model_dump_json()}")
-
-    # 1. 获取 plan 详情
-    plan = get_plan_detail(plan_id)
+    plan = get_plan_detail_operator(plan_id)
     if not plan:
-        print(f"[DISPATCH] Plan not found: {plan_id}")
-        print(f"[DISPATCH] ====== 下发结束(404) ======\n")
         return ApiResponse(code=404, message="Plan not found", data=None)
 
-    print(f"[DISPATCH] plan found, title={plan.get('title', '')}, stages={len(plan.get('stages', []))}")
-
-    # 2. 构建 mission payload
+    vehicle_vid = get_first_vid(plan)
     payload = build_mission_payload(
         plan,
         vehicle_vmfs=body.vehicle_vmfs,
         vehicle_ips=body.vehicle_ips,
         tid=body.tid,
     )
-    print(f"[DISPATCH] mission_payload={json.dumps(payload, ensure_ascii=False, indent=2)}")
+    topic = f"op/t01/g01/v{vehicle_vid}/cmd/MissionService/send_mission"
 
-    # 3. 构造 zenoh topic
-    vehicle = (body.vehicle_topic or "ZD04").strip()
-    topic = f"op/t01/g01/v{vehicle}/cmd/MissionService/send_mission"
-    print(f"[DISPATCH] zenoh_topic={topic}")
+    print(f"\n[DISPATCH-OP] ====== 操控端下发开始 ======")
+    print(f"[DISPATCH-OP] plan_id={plan_id} | vehicle_vid={vehicle_vid} | topic={topic}")
+    print(f"[DISPATCH-OP] mission_payload={json.dumps(payload, ensure_ascii=False, indent=2)}")
 
-    # 4. 通过 zenoh 发布
     ok = zenoh_client.publish(topic, payload)
-    print(f"[DISPATCH] zenoh_publish result={ok}")
+    print(f"[DISPATCH-OP] zenoh_publish result={ok}")
     if not ok:
         err = zenoh_client.get_last_zenoh_error()
-        print(f"[DISPATCH] zenoh error={err}")
-        print(f"[DISPATCH] ====== 下发结束(500) ======\n")
+        print(f"[DISPATCH-OP] zenoh error={err}")
+        print(f"[DISPATCH-OP] ====== 下发结束(500) ======\n")
         return ApiResponse(code=500, message=f"Zenoh 下发失败: {err}", data={"topic": topic})
 
-    print(f"[DISPATCH] ====== 下发成功 ======\n")
-    return ApiResponse(
-        data={
-            "plan_id": plan_id,
-            "action": "dispatch",
-            "topic": topic,
-            "mission_tid": payload["args"]["mission_data"]["task"]["tid"],
-            "message": "任务已通过 Zenoh 下发",
-        }
-    )
+    print(f"[DISPATCH-OP] ====== 下发成功 ======\n")
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "dispatch",
+        "topic": topic,
+        "vehicle_vid": vehicle_vid,
+        "mission_tid": payload["args"]["mission_data"]["task"]["tid"],
+        "message": "任务已通过 Zenoh 下发",
+    })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
+async def start_plan_operator(plan_id: str):
+    """操控端 — 开始执行 — Zenoh control_mission (task_control=1)"""
+    ok, msg = action_runtime.transit(plan_id, "ACTIVE")
+    if not ok:
+        return ApiResponse(code=400, message=msg, data=None)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1)
+    return ApiResponse(data={
+        "plan_id": plan_id, "action": "start", "state": "ACTIVE", "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/pause", response_model=ApiResponse)
+async def pause_plan_operator(plan_id: str):
+    """操控端 — 暂停执行 — Zenoh control_mission (task_control=2)"""
+    ok, msg = action_runtime.transit(plan_id, "PAUSED")
+    if not ok:
+        return ApiResponse(code=400, message=msg, data=None)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=2)
+    return ApiResponse(data={
+        "plan_id": plan_id, "action": "pause", "state": "PAUSED", "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/resume", response_model=ApiResponse)
+async def resume_plan_operator(plan_id: str):
+    """操控端 — 继续执行 — Zenoh control_mission (task_control=3)"""
+    ok, msg = action_runtime.transit(plan_id, "ACTIVE")
+    if not ok:
+        return ApiResponse(code=400, message=msg, data=None)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=3)
+    return ApiResponse(data={
+        "plan_id": plan_id, "action": "resume", "state": "ACTIVE", "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/stop", response_model=ApiResponse)
+async def stop_plan_operator(plan_id: str):
+    """操控端 — 停止/重置 — Zenoh control_mission (task_control=4)"""
+    action_runtime.reset(plan_id)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=4)
+    return ApiResponse(data={
+        "plan_id": plan_id, "action": "stop", "state": "SCHEDULED",
+        "message": "行动序列已停止并重置",
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })

@@ -57,8 +57,11 @@ class RequestLogMiddleware:
         path = request.url.path
         client = scope.get("client", ("unknown", 0))
 
-        # 跳过静态资源和 SSE 流
-        skip_detail = path in ("/docs", "/redoc", "/openapi.json") or path.startswith("/api/v1/planning/events")
+        # 跳过静态资源、SSE 流
+        skip_detail = (
+            path in ("/docs", "/redoc", "/openapi.json")
+            or path.startswith("/api/v1/planning/events")
+        )
 
         # 读取请求体（可重复读取）
         req_body = ""

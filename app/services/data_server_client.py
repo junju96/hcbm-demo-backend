@@ -18,6 +18,7 @@ except ImportError:
 # ========== 配置 ==========
 
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
+OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"  # 操控席数据服务端（后续可独立配置）
 TIMEOUT_SECONDS = 5
 MOCK_MODE = True  # True 时数据服务器不可达也返回 fake data
 
@@ -210,50 +211,59 @@ _killchain_store: Dict[str, Dict[str, Any]] = {
 
 # ========== 内部 HTTP 调用 ==========
 
-def _http_get(path: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
     try:
-        print(f"[DS-OUT] GET  {url} | params={params}")
+        if not silent:
+            print(f"[DS-OUT] GET  {url} | params={params}")
         resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        print(f"[DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
+        if not silent:
+            print(f"[DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"[DS-ERR] GET  {url} | error={e}")
+        if not silent:
+            print(f"[DS-ERR] GET  {url} | error={e}")
         return None
 
 
-def _http_post(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     try:
-        print(f"[DS-OUT] POST {url} | body={body_summary}")
+        if not silent:
+            print(f"[DS-OUT] POST {url} | body={body_summary}")
         resp = requests.post(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
+        if not silent:
+            print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"[DS-ERR] POST {url} | error={e}")
+        if not silent:
+            print(f"[DS-ERR] POST {url} | error={e}")
         return None
 
 
-def _http_patch(path: str, json_body: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     try:
-        print(f"[DS-OUT] PATCH {url} | body={body_summary}")
+        if not silent:
+            print(f"[DS-OUT] PATCH {url} | body={body_summary}")
         resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        print(f"[DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
+        if not silent:
+            print(f"[DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"[DS-ERR] PATCH {url} | error={e}")
+        if not silent:
+            print(f"[DS-ERR] PATCH {url} | error={e}")
         return None
 
 
@@ -441,3 +451,44 @@ def to_frontend_killchain_list(items: List[Dict[str, Any]]) -> List[Dict[str, An
             "is_mock": _get_biz_field(item, "is_mock", False),
         })
     return results
+
+
+# ========== 操控席数据服务端 HTTP 调用 ==========
+
+def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+    """向操控席数据服务器发送 GET 请求"""
+    if not HAS_REQUESTS:
+        return None
+    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    try:
+        if not silent:
+            print(f"[OP-DS-OUT] GET  {url} | params={params}")
+        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        if not silent:
+            print(f"[OP-DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        if not silent:
+            print(f"[OP-DS-ERR] GET  {url} | error={e}")
+        return None
+
+
+def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+    """向操控席数据服务器发送 POST 请求"""
+    if not HAS_REQUESTS:
+        return None
+    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    try:
+        if not silent:
+            print(f"[OP-DS-OUT] POST {url} | body={body_summary}")
+        resp = requests.post(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        if not silent:
+            print(f"[OP-DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        if not silent:
+            print(f"[OP-DS-ERR] POST {url} | error={e}")
+        return None

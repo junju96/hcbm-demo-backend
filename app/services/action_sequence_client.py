@@ -17,7 +17,8 @@ import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
-from app.services.data_server_client import _http_get, _http_post
+from app.services.data_server_client import _http_get, _http_post, _http_get_operator, _http_post_operator
+from app.services import zenoh_client
 
 
 def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -75,8 +76,8 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN"""
-    data = _http_get("/api/v1/task_pool/resources/by_type/PLAN")
+    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN（静默模式，不打印日志）"""
+    data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
@@ -115,15 +116,15 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
 
 def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     """
-    获取方案详情，并转换为前端行动序列需要的格式。
+    获取方案详情，并转换为前端行动序列需要的格式（静默模式，不打印日志）。
     服务器不可达或不存在时返回 None（前端显示空）。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    data = _http_get(f"/api/v1/task_pool/resources/{rid}")
-    if data is not None:
-        raw = data.get("raw_payload", data)
-        plan = raw if isinstance(raw, dict) else {}
+    data = _http_get(f"/api/v1/task_pool/resources/{rid}", silent=True)
+    if data is not None and isinstance(data, dict):
+        # 数据服务端返回的原始数据本身即包含业务字段，无需再提取 raw_payload
+        plan = data
         car_actions = _build_car_actions_from_plan(plan)
         return _to_frontend_plan(plan, car_actions)
 
@@ -548,3 +549,174 @@ def build_mission_payload(
             "mission_data": mission_data,
         },
     }
+
+
+# ==================== MissionService control_mission 相关 ====================
+
+
+def _plan_id_to_tid(plan_id: str) -> int:
+    """从 plan_id 提取或生成 tid"""
+    nums = re.findall(r"\d+", plan_id)
+    if nums:
+        return int("".join(nums)[:10]) or 10001
+    h = hashlib.md5(plan_id.encode()).hexdigest()[:8]
+    return int(h, 16) % 90000000 + 10000000
+
+
+def get_first_vid(plan: Dict[str, Any]) -> str:
+    """
+    从 plan 中提取第一个 vid（车辆标识）。
+    兼容多种数据结构：vehicle_summary / stages[].team_actions / stages[].team_actions{team_id: [...]}
+    """
+    # 1) 优先从 vehicle_summary 取
+    vehicle_summary = plan.get("vehicle_summary", [])
+    if isinstance(vehicle_summary, list) and len(vehicle_summary) > 0:
+        vid = vehicle_summary[0].get("vid", "")
+        if vid:
+            return vid
+
+    # 2) 从 stages[].team_actions 取
+    stages = plan.get("stages", [])
+    for stage in stages:
+        team_actions = stage.get("team_actions", {})
+        # dict 格式: {team_id: [{vid, actions}]}
+        if isinstance(team_actions, dict):
+            for team_id, vehicles in team_actions.items():
+                if isinstance(vehicles, list) and len(vehicles) > 0:
+                    vid = vehicles[0].get("vid", "")
+                    if vid:
+                        return vid
+        # list 格式: [{team_id, team_actions: [{vid, actions}]}]
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles = ta.get("team_actions", [])
+                if isinstance(vehicles, list) and len(vehicles) > 0:
+                    vid = vehicles[0].get("vid", "")
+                    if vid:
+                        return vid
+
+    # 3) fallback
+    return "ZD04"
+
+
+def build_control_mission_payload(
+    plan_id: str,
+    task_control: int,
+    vehicle_vid: Optional[str] = None,
+) -> tuple[str, Dict[str, Any]]:
+    """
+    构建 MissionService control_mission 的 payload。
+
+    Returns:
+        (topic, payload)
+    """
+    tid = _plan_id_to_tid(plan_id)
+
+    # 如果传了 vehicle_vid 则直接用，否则从 plan 详情里取
+    if vehicle_vid:
+        vid = vehicle_vid
+    else:
+        plan = get_plan_detail(plan_id)
+        vid = get_first_vid(plan) if plan else "ZD04"
+
+    topic = f"op/t01/g01/v{vid}/cmd/MissionService/control_mission"
+    payload = {
+        "service": "MissionService",
+        "action": "control_mission",
+        "args": {
+            "taskid": tid,
+            "aid": 0,
+            "task_control": task_control,
+            "action_control": 0,
+        },
+    }
+    return topic, payload
+
+
+def publish_control_mission(
+    plan_id: str,
+    task_control: int,
+    vehicle_vid: Optional[str] = None,
+) -> tuple[bool, str]:
+    """
+    通过 Zenoh 发送 control_mission。
+
+    Args:
+        plan_id: 方案 ID
+        task_control: 1=开始, 2=暂停, 3=继续, 4=停止
+        vehicle_vid: 可选，指定车辆 vid；不指定则自动从 plan 中取第一个 vid
+
+    Returns:
+        (success, message)
+    """
+    import json
+
+    topic, payload = build_control_mission_payload(plan_id, task_control, vehicle_vid)
+    print(f"[ZENOH-CTRL] task_control={task_control} | topic={topic} | tid={payload['args']['taskid']}")
+
+    ok = zenoh_client.publish(topic, payload)
+    if ok:
+        return True, f"control_mission 已下发 | topic={topic} | task_control={task_control}"
+    else:
+        err = zenoh_client.get_last_zenoh_error()
+        print(f"[ZENOH-CTRL] publish failed: {err}")
+        return False, f"Zenoh 下发失败: {err}"
+
+
+# ==================== 操控席数据服务端接口 ====================
+
+
+def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
+    """向操控席数据服务器查询行动方案列表 — GET /by_type/PLAN（静默模式）"""
+    data = _http_get_operator("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
+    items = []
+    if data is not None and isinstance(data, list):
+        items = data[:limit]
+    elif data is not None and isinstance(data, dict):
+        items = (data.get("items") or data.get("data") or [])[:limit]
+
+    result = []
+    for item in items:
+        raw = item.get("raw_payload", {}) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        tactic = raw.get("tactic") or {}
+        if not isinstance(tactic, dict):
+            tactic = {}
+        title = (
+            tactic.get("title")
+            or raw.get("title")
+            or item.get("title")
+            or raw.get("plan_id", "")
+        )
+        state = raw.get("state") or item.get("state") or "DRAFT"
+        result.append({
+            "plan_id": raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "resource_id": item.get("resource_id", ""),
+            "title": title,
+            "description": raw.get("description") or item.get("description") or "",
+            "state": state,
+            "teams_count": len(raw.get("teams", [])),
+            "stages_count": len(raw.get("stages", [])),
+        })
+    return result
+
+
+def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
+    """向操控席数据服务器获取方案详情（静默模式）"""
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    data = _http_get_operator(f"/api/v1/task_pool/resources/{rid}", silent=True)
+    if data is not None and isinstance(data, dict):
+        plan = data
+        car_actions = _build_car_actions_from_plan(plan)
+        return _to_frontend_plan(plan, car_actions)
+    return None
+
+
+def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """将行动方案原样 import 到操控席数据服务器"""
+    result = _http_post_operator(
+        "/api/v1/task_pool/ingestion/import",
+        {"resources": [plan], "return_data_type": "typed", "ignore_errors": True},
+    )
+    return result
