@@ -817,30 +817,28 @@ async def task_pool_query(body: Dict[str, Any]):
     task_type = body.get("task_type")
     limit = body.get("limit", 50)
 
-    # KILL_CHAIN 类型：合并数据服务器 + 本地 mock
+    # KILL_CHAIN 类型：只从数据服务器查询，不再合并本地 mock
     if task_type == "KILL_CHAIN":
         ds_items = ds_query_kill_chains(limit=limit) or []
-        local_items = task_pool.query(task_type="KILL_CHAIN", limit=limit)
-        # 去重：以 kill_chain_id 为键，本地 mock 优先覆盖
-        merged = {}
-        for item in ds_items:
-            kcid = item.get("kill_chain_id") or item.get("resource_id", "")
-            merged[kcid] = item
-        for item in local_items:
-            kcid = item.get("kill_chain_id") or item.get("resource_id", "")
-            merged[kcid] = item
-        return ApiResponse(data={"items": to_frontend_killchain_list(list(merged.values())), "total": len(merged)})
+        return ApiResponse(data={"items": to_frontend_killchain_list(ds_items), "total": len(ds_items)})
 
-    # PLAN 类型：从本地内存查询并适配为前端格式
+    # PLAN 类型：从数据服务器查询（不再使用本地 mock）
     if task_type == "PLAN":
-        local_items = task_pool.query(task_type="PLAN", limit=limit)
+        ds_data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
+        items = []
+        if ds_data is not None:
+            if isinstance(ds_data, list):
+                items = ds_data[:limit]
+            elif isinstance(ds_data, dict):
+                items = (ds_data.get("items") or ds_data.get("data") or [])[:limit]
         adapted = []
-        for item in local_items:
+        for item in items:
+            raw = item.get("raw_payload", {}) or item if isinstance(item, dict) else {}
             adapted.append({
                 "resource_id": item.get("resource_id", ""),
-                "resource_name": item.get("title", ""),
+                "resource_name": raw.get("title") or item.get("title", ""),
                 "task_type": "PLAN",
-                "state": item.get("state", "DRAFT"),
+                "state": raw.get("state") or item.get("state", "DRAFT"),
                 "resource_detail": item,
             })
         return ApiResponse(data={"items": adapted, "total": len(adapted)})

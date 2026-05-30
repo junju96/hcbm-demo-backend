@@ -126,9 +126,19 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
         # 数据服务端返回的原始数据本身即包含业务字段，无需再提取 raw_payload
         plan = data
         car_actions = _build_car_actions_from_plan(plan)
-        return _to_frontend_plan(plan, car_actions)
+        result = _to_frontend_plan(plan, car_actions)
+        # 调试：打印第一个 vehicle 的第一个 action 的字段
+        vs = result.get("vehicle_summary", [])
+        if vs:
+            first_actions = (vs[0].get("stages") or [{}])[0].get("actions", [])
+            if first_actions:
+                print(f"[AS-DEBUG] plan={plan_id} first_action_keys={list(first_actions[0].keys())} action_type={first_actions[0].get('action_type')}")
+            else:
+                print(f"[AS-DEBUG] plan={plan_id} no actions in first vehicle stage")
+        return result
 
     # 服务器不可达或 plan 不存在 — 返回 None
+    print(f"[AS-DEBUG] plan={plan_id} data_server returned None or non-dict")
     return None
 
 

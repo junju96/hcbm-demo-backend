@@ -20,7 +20,7 @@ except ImportError:
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
 OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"  # 操控席数据服务端（后续可独立配置）
 TIMEOUT_SECONDS = 5
-MOCK_MODE = True  # True 时数据服务器不可达也返回 fake data
+MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
 
 # 数据服务器接受的资源 state 合法值（PLAN / KILL_CHAIN 等通用）
 VALID_RESOURCE_STATES = {
@@ -42,171 +42,8 @@ def validate_resource_state(resource: Dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
-# ========== Fake Response 数据（来自 test.py） ==========
-
-_FAKE_KILLCHAIN = {
-    "resource_id": "kill_chain:kill_chain_001",
-    "task_type": "KILL_CHAIN",
-    "attributes": {"cache_key": "kill_chain:kill_chain_001"},
-    "search_text": "KILL_CHAIN kill_chain-kill_chain_001 针对区域B的敌方T-72坦克，执行侦察→识别→打击→评估的完整杀伤链。 ACTIVE",
-    "source": {
-        "source_data_module": "task_pool",
-        "source_topic": "api/import",
-        "source_type": "api",
-        "last_update_at": "2026-05-27T05:06:24.503814+00:00",
-    },
-    "raw_payload": {},
-    "title": "对敌装甲目标杀伤链",
-    "kill_chain_id": "kill_chain_001",
-    "description": "针对区域B的敌方T-72坦克，执行侦察→识别→打击→评估的完整杀伤链。",
-    "state": "ACTIVE",
-    "resource_ids": ["eq_无人车A", "eq_巡逻无人机", "eq_无人车B", "target_001"],
-    "target_ids": ["target_001"],
-    "mapped_plan_ids": ["plan_001"],
-    "mapping_summary": {
-        "plan_title": "地面引导与打击作战方案",
-        "match_score": 0.95,
-        "estimated_time_sec": 1800,
-        "remarks": "与方案plan_001高度匹配，满足时间窗口要求",
-    },
-    "raw_entries": [
-        {
-            "entry_id": "entry_01",
-            "phase": "RAW",
-            "entry_seq": 1,
-            "target_ids": ["target_001"],
-            "operation": "侦察",
-            "executor_options": [
-                {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": False, "note": "配备光电传感器，适合近距离侦察"},
-                {"executor_id": "eq_巡逻无人机", "allocation_count": 1, "locked": False, "note": "可提供空中视角，但续航较短"},
-            ],
-            "selected_executor": None,
-            "locked": False,
-            "is_valid": True,
-            "notes": "需在目标进入开阔区域后执行",
-        },
-        {
-            "entry_id": "entry_02",
-            "phase": "RAW",
-            "entry_seq": 2,
-            "target_ids": ["target_001"],
-            "operation": "识别",
-            "executor_options": [
-                {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": False, "note": "利用白光/热像进行目标确认"},
-                {"executor_id": "eq_巡逻无人机", "allocation_count": 1, "locked": False, "note": "通过图像识别算法验证"},
-            ],
-            "selected_executor": None,
-            "locked": False,
-            "is_valid": True,
-            "notes": "识别置信度需高于90%",
-        },
-        {
-            "entry_id": "entry_03",
-            "phase": "RAW",
-            "entry_seq": 3,
-            "target_ids": ["target_001"],
-            "operation": "打击",
-            "executor_options": [
-                {"executor_id": "eq_无人车B", "allocation_count": 2, "locked": False, "note": "主炮备弹12发，建议使用2发确保毁伤"},
-            ],
-            "selected_executor": None,
-            "locked": False,
-            "is_valid": True,
-            "notes": "打击窗口宽度30秒",
-        },
-        {
-            "entry_id": "entry_04",
-            "phase": "RAW",
-            "entry_seq": 4,
-            "target_ids": ["target_001"],
-            "operation": "评估",
-            "executor_options": [
-                {"executor_id": "eq_巡逻无人机", "allocation_count": 1, "locked": False, "note": "打击后飞越目标区域采集毁伤图像"},
-                {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": False, "note": "抵近观察热特征变化"},
-            ],
-            "selected_executor": None,
-            "locked": False,
-            "is_valid": True,
-            "notes": "需在打击后2分钟内完成评估",
-        },
-    ],
-    "assigned_entries": [
-        {
-            "entry_id": "entry_01",
-            "phase": "ASSIGNED",
-            "entry_seq": 1,
-            "target_ids": ["target_001"],
-            "operation": "侦察",
-            "executor_options": [
-                {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": True, "note": "最终选定"},
-            ],
-            "selected_executor": "eq_无人车A",
-            "locked": True,
-            "is_valid": True,
-            "notes": "已分配，无人车A已就位",
-        },
-        {
-            "entry_id": "entry_02",
-            "phase": "ASSIGNED",
-            "entry_seq": 2,
-            "target_ids": ["target_001"],
-            "operation": "识别",
-            "executor_options": [
-                {"executor_id": "eq_无人车A", "allocation_count": 1, "locked": True, "note": "使用白光/热像识别"},
-            ],
-            "selected_executor": "eq_无人车A",
-            "locked": True,
-            "is_valid": True,
-            "notes": "已分配",
-        },
-        {
-            "entry_id": "entry_03",
-            "phase": "ASSIGNED",
-            "entry_seq": 3,
-            "target_ids": ["target_001"],
-            "operation": "打击",
-            "executor_options": [
-                {"executor_id": "eq_无人车B", "allocation_count": 2, "locked": True, "note": "使用高爆穿甲弹"},
-            ],
-            "selected_executor": "eq_无人车B",
-            "locked": True,
-            "is_valid": True,
-            "notes": "待识别确认后立即执行",
-        },
-        {
-            "entry_id": "entry_04",
-            "phase": "ASSIGNED",
-            "entry_seq": 4,
-            "target_ids": ["target_001"],
-            "operation": "评估",
-            "executor_options": [
-                {"executor_id": "eq_巡逻无人机", "allocation_count": 1, "locked": True, "note": "打击后飞越评估"},
-            ],
-            "selected_executor": "eq_巡逻无人机",
-            "locked": True,
-            "is_valid": True,
-            "notes": "已分配",
-        },
-    ],
-}
-
-_FAKE_KILLCHAIN_LIST = [
-    {
-        "resource_id": "kill_chain:kill_chain_001",
-        "task_type": "KILL_CHAIN",
-        "kill_chain_id": "kill_chain_001",
-        "title": "对敌装甲目标杀伤链",
-        "description": "针对区域B的敌方T-72坦克，执行侦察→识别→打击→评估的完整杀伤链。",
-        "state": "ACTIVE",
-        "target_count": 1,
-        "entry_count": 4,
-    },
-]
-
-# 内存缓存（模拟数据服务器状态）
-_killchain_store: Dict[str, Dict[str, Any]] = {
-    "kill_chain:kill_chain_001": copy.deepcopy(_FAKE_KILLCHAIN),
-}
+# ========== 内部缓存（用于非 KILL_CHAIN/PLAN 类型的本地数据）
+# 注意：KILL_CHAIN 和 PLAN 类型不再使用本地 mock，全部从数据服务端查询
 
 
 # ========== 内部 HTTP 调用 ==========
@@ -271,30 +108,18 @@ def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = Fals
 
 def get_kill_chain(resource_id: str) -> Optional[Dict[str, Any]]:
     """查询单个杀伤链详情"""
-    # 1. 尝试真实调用数据服务器
     data = _http_get(f"/api/v1/task_pool/resources/{resource_id}")
-    if data is not None:
-        return data
-
-    # 2. MOCK fallback
-    if MOCK_MODE:
-        return copy.deepcopy(_killchain_store.get(resource_id))
-    return None
+    return data
 
 
 def query_kill_chains(limit: int = 20) -> List[Dict[str, Any]]:
     """查询所有杀伤链列表"""
-    # 1. 尝试真实调用
     data = _http_post(
         "/api/v1/task_pool/resources/query",
         {"task_type": "KILL_CHAIN", "limit": limit},
     )
     if data is not None and isinstance(data, list):
         return data
-
-    # 2. MOCK fallback
-    if MOCK_MODE:
-        return [copy.deepcopy(_FAKE_KILLCHAIN)]
     return []
 
 
@@ -308,31 +133,15 @@ def create_kill_chain(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if "updated_at" not in payload:
         payload["updated_at"] = payload["created_at"]
 
-    # 1. 尝试真实调用
     result = _http_post(
         "/api/v1/task_pool/ingestion/import",
         {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
     )
-    if result is not None:
-        return result
-
-    # 2. MOCK fallback：写入内存缓存
-    if MOCK_MODE:
-        _killchain_store[resource_id] = copy.deepcopy(payload)
-        return {
-            "requested_resources": 1,
-            "normalized_resources": 1,
-            "upserted_resources": 1,
-            "failures": [],
-            "imported_at": datetime.now(timezone.utc).isoformat(),
-            "summary": {"resource_id": resource_id},
-        }
-    return None
+    return result
 
 
 def patch_kill_chain(resource_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """更新杀伤链：将特有字段打包到 payload 中传递"""
-    # 分离通用字段和杀伤链特有字段
     generic_fields = {}
     killchain_fields = {}
 
@@ -347,41 +156,17 @@ def patch_kill_chain(resource_id: str, payload: Dict[str, Any]) -> Optional[Dict
     if killchain_fields:
         patch_body["payload"] = killchain_fields
 
-    # 1. 尝试真实调用
     data = _http_patch(f"/api/v1/task_pool/resources/{resource_id}", patch_body)
-    if data is not None:
-        return data
-
-    # 2. MOCK fallback：更新内存缓存
-    if MOCK_MODE and resource_id in _killchain_store:
-        resource = _killchain_store[resource_id]
-        for k, v in generic_fields.items():
-            if v is not None:
-                resource[k] = v
-        if "payload" in patch_body:
-            for k, v in patch_body["payload"].items():
-                if v is not None:
-                    resource[k] = v
-        resource["updated_at"] = datetime.now(timezone.utc).isoformat()
-        return copy.deepcopy(resource)
-    return None
+    return data
 
 
 def delete_kill_chain(resource_id: str) -> bool:
-    """删除杀伤链：调用生命周期接口或直接从缓存移除"""
-    # 1. 尝试真实调用生命周期接口
+    """删除杀伤链：调用生命周期接口"""
     result = _http_post(
         f"/api/v1/task_pool/resources/{resource_id}/lifecycle",
         {"state": "DELETED", "reason": "user_deleted"},
     )
-    if result is not None:
-        return True
-
-    # 2. MOCK fallback
-    if MOCK_MODE and resource_id in _killchain_store:
-        del _killchain_store[resource_id]
-        return True
-    return False
+    return result is not None
 
 
 # ========== 前端适配：转换为前端熟悉的数据结构 ==========
