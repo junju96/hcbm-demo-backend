@@ -86,30 +86,34 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
         items = (data.get("items") or data.get("data") or [])[:limit]
 
     result = []
-    for item in items:
+    for idx, item in enumerate(items):
         raw = item.get("raw_payload", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
-        # title 优先从 tactic.title -> raw_payload.title -> 顶层title -> plan_id
-        tactic = raw.get("tactic") or {}
+        # 统一优先从顶层取，顶层没有再 fallback 到 raw_payload
+        tactic = item.get("tactic") or raw.get("tactic") or {}
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
             tactic.get("title")
-            or raw.get("title")
             or item.get("title")
+            or raw.get("title")
+            or item.get("plan_id")
             or raw.get("plan_id", "")
         )
-        # state 优先从 raw_payload.state -> 顶层state -> DRAFT
-        state = raw.get("state") or item.get("state") or "DRAFT"
+        state = item.get("state") or raw.get("state") or "DRAFT"
+        stages_top = item.get("stages")
+        stages_raw = raw.get("stages", [])
+        if idx == 0:
+            print(f"[AS-DEBUG] query_plans first item: resource_id={item.get('resource_id')}, stages_top={len(stages_top) if isinstance(stages_top, list) else 'N/A'}, stages_raw={len(stages_raw)}, final_stages_count={len(stages_top or stages_raw)}")
         result.append({
-            "plan_id": raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
-            "description": raw.get("description") or item.get("description") or "",
+            "description": item.get("description") or raw.get("description") or "",
             "state": state,
-            "teams_count": len(raw.get("teams", [])),
-            "stages_count": len(raw.get("stages", [])),
+            "teams_count": len(item.get("teams") or raw.get("teams", [])),
+            "stages_count": len(stages_top or stages_raw),
         })
     return result
 
@@ -164,7 +168,7 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
             "state": ca.get("state", "READY"),
         })
 
-    # title fallback：tactic.title -> raw_payload.title -> plan_id
+    # title fallback：tactic.title -> 顶层title -> plan_id
     tactic = plan.get("tactic") or {}
     if not isinstance(tactic, dict):
         tactic = {}
@@ -690,24 +694,26 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
         raw = item.get("raw_payload", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
-        tactic = raw.get("tactic") or {}
+        # 统一优先从顶层取，顶层没有再 fallback 到 raw_payload
+        tactic = item.get("tactic") or raw.get("tactic") or {}
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
             tactic.get("title")
-            or raw.get("title")
             or item.get("title")
+            or raw.get("title")
+            or item.get("plan_id")
             or raw.get("plan_id", "")
         )
-        state = raw.get("state") or item.get("state") or "DRAFT"
+        state = item.get("state") or raw.get("state") or "DRAFT"
         result.append({
-            "plan_id": raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
-            "description": raw.get("description") or item.get("description") or "",
+            "description": item.get("description") or raw.get("description") or "",
             "state": state,
-            "teams_count": len(raw.get("teams", [])),
-            "stages_count": len(raw.get("stages", [])),
+            "teams_count": len(item.get("teams") or raw.get("teams", [])),
+            "stages_count": len(item.get("stages") or raw.get("stages", [])),
         })
     return result
 

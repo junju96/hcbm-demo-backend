@@ -833,12 +833,15 @@ async def task_pool_query(body: Dict[str, Any]):
                 items = (ds_data.get("items") or ds_data.get("data") or [])[:limit]
         adapted = []
         for item in items:
-            raw = item.get("raw_payload", {}) or item if isinstance(item, dict) else {}
+            raw = item.get("raw_payload", {}) or {}
+            if not isinstance(raw, dict):
+                raw = {}
+            # 统一优先从顶层取，顶层没有再 fallback 到 raw_payload
             adapted.append({
                 "resource_id": item.get("resource_id", ""),
-                "resource_name": raw.get("title") or item.get("title", ""),
+                "resource_name": item.get("title") or raw.get("title", ""),
                 "task_type": "PLAN",
-                "state": raw.get("state") or item.get("state", "DRAFT"),
+                "state": item.get("state") or raw.get("state", "DRAFT"),
                 "resource_detail": item,
             })
         return ApiResponse(data={"items": adapted, "total": len(adapted)})

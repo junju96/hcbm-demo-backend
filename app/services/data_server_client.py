@@ -172,16 +172,14 @@ def delete_kill_chain(resource_id: str) -> bool:
 # ========== 前端适配：转换为前端熟悉的数据结构 ==========
 
 def _get_biz_field(data: Dict[str, Any], field: str, default: Any = "") -> Any:
-    """优先从 raw_payload 读取业务字段，fallback 到顶层字段"""
-    return data.get("raw_payload", {}).get(field, data.get(field, default))
+    """优先从顶层读取业务字段，fallback 到 raw_payload"""
+    return data.get(field) or data.get("raw_payload", {}).get(field, default)
 
 
 def to_frontend_killchain(data: Dict[str, Any]) -> Dict[str, Any]:
     """将数据服务器返回的 KillChain (TaskView) 转换为前端格式
 
-    注意：数据服务器把业务字段存放在 raw_payload 中，顶层 title 等字段
-    通常是系统生成的标识（如 kill_chain-kill_chain_001），因此优先取
-    raw_payload 内的值。
+    注意：优先从顶层字段读取业务数据，顶层不存在时 fallback 到 raw_payload。
 
     KillChain state 合法枚举值：
         INIT, READY, WAITING, ACTIVE, INTERUPT, DONE, DELETED
