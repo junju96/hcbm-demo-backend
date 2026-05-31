@@ -15,7 +15,7 @@
 """
 
 from typing import Any, Dict, List
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
@@ -230,12 +230,12 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
-async def start_plan_operator(plan_id: str):
+async def start_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
     """操控端 — 开始执行 — Zenoh control_mission (task_control=1)"""
     ok, msg = action_runtime.transit(plan_id, "ACTIVE")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1, vehicle_vid=vehicle_vid)
     return ApiResponse(data={
         "plan_id": plan_id, "action": "start", "state": "ACTIVE", "message": msg,
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
@@ -243,12 +243,12 @@ async def start_plan_operator(plan_id: str):
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/pause", response_model=ApiResponse)
-async def pause_plan_operator(plan_id: str):
+async def pause_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
     """操控端 — 暂停执行 — Zenoh control_mission (task_control=2)"""
     ok, msg = action_runtime.transit(plan_id, "PAUSED")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=2)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=2, vehicle_vid=vehicle_vid)
     return ApiResponse(data={
         "plan_id": plan_id, "action": "pause", "state": "PAUSED", "message": msg,
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
@@ -256,12 +256,12 @@ async def pause_plan_operator(plan_id: str):
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/resume", response_model=ApiResponse)
-async def resume_plan_operator(plan_id: str):
+async def resume_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
     """操控端 — 继续执行 — Zenoh control_mission (task_control=3)"""
     ok, msg = action_runtime.transit(plan_id, "ACTIVE")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=3)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=3, vehicle_vid=vehicle_vid)
     return ApiResponse(data={
         "plan_id": plan_id, "action": "resume", "state": "ACTIVE", "message": msg,
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
@@ -269,10 +269,10 @@ async def resume_plan_operator(plan_id: str):
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/stop", response_model=ApiResponse)
-async def stop_plan_operator(plan_id: str):
+async def stop_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
     """操控端 — 停止/重置 — Zenoh control_mission (task_control=4)"""
     action_runtime.reset(plan_id)
-    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=4)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=4, vehicle_vid=vehicle_vid)
     return ApiResponse(data={
         "plan_id": plan_id, "action": "stop", "state": "SCHEDULED",
         "message": "行动序列已停止并重置",

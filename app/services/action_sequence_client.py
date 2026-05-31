@@ -148,6 +148,17 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
 
 def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
     """转换为前端需要的 Plan + ActionSequence 格式"""
+    # 先建立 vid -> resource_type 映射（从 plan.teams 查找）
+    team_type_map: Dict[str, str] = {}
+    for team in plan.get("teams", []):
+        if isinstance(team, dict):
+            vehicles = team.get("vehicles", [])
+            for v in vehicles:
+                if isinstance(v, dict) and v.get("vid"):
+                    team_type_map[v["vid"]] = v.get("resource_type", "")
+            if team.get("vid"):
+                team_type_map[team["vid"]] = team.get("resource_type", "")
+
     # 车辆汇总：按 vid 聚合所有阶段中的行动
     vehicle_map: Dict[str, Dict[str, Any]] = {}
     for ca in car_actions:
@@ -155,6 +166,7 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         if vid not in vehicle_map:
             vehicle_map[vid] = {
                 "vid": vid,
+                "resource_type": team_type_map.get(vid, ""),
                 "total_actions": 0,
                 "current_state": "READY",
                 "stages": [],
