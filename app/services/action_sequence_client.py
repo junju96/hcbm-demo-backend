@@ -68,6 +68,7 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "team_id": team_id,
                     "actions": copy.deepcopy(actions),
                     "state": vehicle.get("state") or "SCHEDULED",
+                    "action_type": vehicle.get("action_type", ""),
                 })
 
     # 按 stage_seq -> vid 排序
@@ -95,9 +96,9 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
-            tactic.get("title")
-            or item.get("title")
+            item.get("title")
             or raw.get("title")
+            or tactic.get("title")
             or item.get("plan_id")
             or raw.get("plan_id", "")
         )
@@ -171,22 +172,42 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
                 "current_state": "READY",
                 "stages": [],
             }
-        vehicle_map[vid]["total_actions"] += len(ca.get("actions", []))
-        vehicle_map[vid]["stages"].append({
-            "stage_id": ca["stage_id"],
-            "stage_title": ca["stage_title"],
-            "stage_seq": ca["stage_seq"],
-            "actions": ca.get("actions", []),
-            "state": ca.get("state", "READY"),
-        })
+        actions = ca.get("actions", [])
+        action_type = ca.get("action_type", "")
+        # 把 car_actions 的 action_type 注入到每个 action 中
+        if action_type:
+            actions = [dict(a, action_type=action_type) for a in actions]
 
-    # title fallback：tactic.title -> 顶层title -> plan_id
+        # 同一个 stage_id 已存在则合并 actions，避免重复 stage
+        existing_stage = next(
+            (s for s in vehicle_map[vid]["stages"] if s["stage_id"] == ca["stage_id"]), None
+        )
+        if existing_stage:
+            seen_ids = {a.get("action_id") or a.get("action_seq") for a in existing_stage["actions"]}
+            for a in actions:
+                aid = a.get("action_id") or a.get("action_seq")
+                if aid not in seen_ids:
+                    seen_ids.add(aid)
+                    existing_stage["actions"].append(a)
+            # 重新计算 total_actions
+            vehicle_map[vid]["total_actions"] = sum(len(s["actions"]) for s in vehicle_map[vid]["stages"])
+        else:
+            vehicle_map[vid]["total_actions"] += len(actions)
+            vehicle_map[vid]["stages"].append({
+                "stage_id": ca["stage_id"],
+                "stage_title": ca["stage_title"],
+                "stage_seq": ca["stage_seq"],
+                "actions": actions,
+                "state": ca.get("state", "READY"),
+            })
+
+    # title fallback：plan.title -> tactic.title -> plan_id
     tactic = plan.get("tactic") or {}
     if not isinstance(tactic, dict):
         tactic = {}
     title = (
-        tactic.get("title")
-        or plan.get("title")
+        plan.get("title")
+        or tactic.get("title")
         or plan.get("plan_id", "")
     )
     return {
@@ -305,17 +326,34 @@ def _build_service_from_action(action: Dict[str, Any]) -> Dict[str, Any]:
     description = action.get("description", "")
     param = action.get("param") or {}
     waypoints = param.get("waypoints") if isinstance(param, dict) else None
-    sid = _action_name_to_sid(name)
+
+    # 根据 action_type 推断 sid；未匹配时默认 1
+    action_type = (action.get("action_type") or "").strip()
+    ACTION_TYPE_TO_SID = {
+        "Lens-Recon": 21,
+        "Auto-Move": 1,
+        "7.62mm-Gun-Shot": 25,
+        "AT-Missile-Launch": 26,
+        "Rocket-Launch": 23,
+        "Loitering-Munition-Launch": 24,
+    }
+    sid = ACTION_TYPE_TO_SID.get(action_type)
+    if sid is None:
+        sid = _action_name_to_sid(name)
 
     # sid = 1: 自主机动 — 优先使用 waypoints
     if sid == 1 and waypoints and isinstance(waypoints, list) and len(waypoints) >= 2:
         points = []
         for wp in waypoints:
             if isinstance(wp, dict):
+                # 兼容两种字段名: longitude/latitude/altitude 和 lon/lat/alt
+                lon = wp.get("longitude") if wp.get("longitude") is not None else wp.get("lon", 0)
+                lat = wp.get("latitude") if wp.get("latitude") is not None else wp.get("lat", 0)
+                alt = wp.get("altitude") if wp.get("altitude") is not None else wp.get("alt", 0)
                 points.append({
-                    "lon": int(wp.get("longitude", 0) * 1e6),
-                    "lat": int(wp.get("latitude", 0) * 1e6),
-                    "alt": int((wp.get("altitude", 0) or 0) * 10),
+                    "lon": int(float(lon) * 1e6),
+                    "lat": int(float(lat) * 1e6),
+                    "alt": int(float(alt or 0) * 10),
                     "radius": wp.get("radius", -1),
                     "type": wp.get("type", 1),
                 })
@@ -411,6 +449,49 @@ def _build_service_from_action(action: Dict[str, Any]) -> Dict[str, Any]:
     if sid == 8:
         return {"sid": 8, "type": param.get("type", 1)}
 
+    if sid == 21:
+        # Lens-Recon: 光学侦察 — 从 param 中提取坐标（兼容 waypoints / recon_position / fire_position 等）
+        points = []
+        if isinstance(param, dict):
+            # 1) 优先 waypoints 列表
+            wps = param.get("waypoints")
+            if isinstance(wps, list) and wps:
+                for wp in wps:
+                    if isinstance(wp, dict):
+                        lon = wp.get("longitude") if wp.get("longitude") is not None else wp.get("lon", 0)
+                        lat = wp.get("latitude") if wp.get("latitude") is not None else wp.get("lat", 0)
+                        alt = wp.get("altitude") if wp.get("altitude") is not None else wp.get("alt", 0)
+                        points.append({
+                            "lon": int(float(lon) * 1e6),
+                            "lat": int(float(lat) * 1e6),
+                            "alt": int(float(alt or 0) * 10),
+                            "radius": wp.get("radius", -1),
+                            "type": wp.get("type", 1),
+                        })
+            # 2) 没有 waypoints 则尝试单点坐标字段
+            if not points:
+                for key in ("recon_position", "fire_position", "target_position", "position"):
+                    pos = param.get(key)
+                    if isinstance(pos, dict):
+                        lon = pos.get("longitude") if pos.get("longitude") is not None else pos.get("lon", 0)
+                        lat = pos.get("latitude") if pos.get("latitude") is not None else pos.get("lat", 0)
+                        alt = pos.get("altitude") if pos.get("altitude") is not None else pos.get("alt", 0)
+                        points.append({
+                            "lon": int(float(lon) * 1e6),
+                            "lat": int(float(lat) * 1e6),
+                            "alt": int(float(alt or 0) * 10),
+                            "radius": pos.get("radius", -1),
+                            "type": pos.get("type", 1),
+                        })
+                        break
+        return {
+            "sid": 21,
+            "points": points,
+            "limited_speed": param.get("limited_speed", 20),
+            "safe_mode": param.get("safe_mode", 0),
+            "loop_mode": param.get("loop_mode", 0),
+        }
+
     # 兜底
     return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
 
@@ -420,6 +501,7 @@ def build_mission_data(
     vehicle_vmfs: Optional[Dict[str, int]] = None,
     vehicle_ips: Optional[Dict[str, str]] = None,
     tid: Optional[int] = None,
+    target_vid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     将 plan 转换为 MissionService 的 mission_data 格式。
@@ -465,10 +547,14 @@ def build_mission_data(
                 for vehicle in vehicles:
                     vid = vehicle.get("vid", "")
                     actions = vehicle.get("actions", [])
+                    car_action_type = vehicle.get("action_type", "")
                     if vid and actions:
                         if vid not in vehicle_actions_map:
                             vehicle_actions_map[vid] = []
-                        vehicle_actions_map[vid].extend(actions)
+                        for a in actions:
+                            # 优先保留 action 自带的 action_type；car_actions 层级有值时才覆盖
+                            at = car_action_type or a.get("action_type", "")
+                            vehicle_actions_map[vid].append(dict(a, action_type=at))
         elif isinstance(team_actions, list):
             for ta in team_actions:
                 team_id = ta.get("team_id", "")
@@ -476,10 +562,13 @@ def build_mission_data(
                 for vehicle in vehicles:
                     vid = vehicle.get("vid", "")
                     actions = vehicle.get("actions", [])
+                    car_action_type = vehicle.get("action_type", "")
                     if vid and actions:
                         if vid not in vehicle_actions_map:
                             vehicle_actions_map[vid] = []
-                        vehicle_actions_map[vid].extend(actions)
+                        for a in actions:
+                            at = car_action_type or a.get("action_type", "")
+                            vehicle_actions_map[vid].append(dict(a, action_type=at))
 
     # 也兼容 vehicle_summary 结构
     vehicle_summary = plan.get("vehicle_summary", [])
@@ -487,6 +576,7 @@ def build_mission_data(
         vid = vsum.get("vid", "")
         for stage in vsum.get("stages", []):
             actions = stage.get("actions", [])
+            # vehicle_summary 中的 stage 没有 action_type，尝试从 action 自身读取
             if vid and actions:
                 if vid not in vehicle_actions_map:
                     vehicle_actions_map[vid] = []
@@ -497,16 +587,19 @@ def build_mission_data(
         seen = set()
         uniq = []
         for a in vehicle_actions_map[vid]:
-            aid = a.get("action_id", a.get("action_seq", id(a)))
+            # action_id 为 None/空时用 action_seq 兜底，避免全部误判为同一 action
+            aid = a.get("action_id") or a.get("action_seq", id(a))
             if aid not in seen:
                 seen.add(aid)
                 uniq.append(a)
         uniq.sort(key=lambda x: x.get("action_seq", 0))
         vehicle_actions_map[vid] = uniq
 
-    # 构建 vehicles
+    # 构建 vehicles（如指定 target_vid 则只下发该车辆的行动序列）
     mission_vehicles = []
     for vid, actions in vehicle_actions_map.items():
+        if target_vid and vid.replace("equipment:", "") != target_vid.replace("equipment:", ""):
+            continue
         vmf = (vehicle_vmfs or {}).get(vid)
         if vmf is None:
             # 尝试 vid 本身就是数字
@@ -560,6 +653,7 @@ def build_mission_payload(
     vehicle_vmfs: Optional[Dict[str, int]] = None,
     vehicle_ips: Optional[Dict[str, str]] = None,
     tid: Optional[int] = None,
+    target_vid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     构建完整的 MissionService send_mission payload。
@@ -567,7 +661,7 @@ def build_mission_payload(
     Returns:
         {"service": "MissionService", "action": "send_mission", "args": {"mission_data": {...}}}
     """
-    mission_data = build_mission_data(plan, vehicle_vmfs, vehicle_ips, tid)
+    mission_data = build_mission_data(plan, vehicle_vmfs, vehicle_ips, tid, target_vid)
     return {
         "service": "MissionService",
         "action": "send_mission",
@@ -644,6 +738,8 @@ def build_control_mission_payload(
     else:
         plan = get_plan_detail(plan_id)
         vid = get_first_vid(plan) if plan else "ZD04"
+    # 去掉 equipment: 前缀（如 equipment:XL01 → XL01）
+    vid = vid.replace("equipment:", "") if vid else vid
 
     topic = f"op/t01/g01/v{vid}/cmd/MissionService/control_mission"
     payload = {
@@ -698,8 +794,13 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
+        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}")
     elif data is not None and isinstance(data, dict):
-        items = (data.get("items") or data.get("data") or [])[:limit]
+        raw_items = data.get("items") or data.get("data") or []
+        items = raw_items[:limit]
+        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
+    else:
+        print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
 
     result = []
     for item in items:
@@ -711,9 +812,9 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
-            tactic.get("title")
-            or item.get("title")
+            item.get("title")
             or raw.get("title")
+            or tactic.get("title")
             or item.get("plan_id")
             or raw.get("plan_id", "")
         )

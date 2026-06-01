@@ -133,7 +133,10 @@ app = FastAPI(
 )
 
 # 请求/响应日志 — 联调时查看每个接口的入参和出参
-app.add_middleware(RequestLogMiddleware)
+# 如需只打印 zenoh 调试日志，设置环境变量 ZENOH_ONLY_LOG=1
+import os
+if not os.environ.get("ZENOH_ONLY_LOG"):
+    app.add_middleware(RequestLogMiddleware)
 
 # CORS — 允许前端跨域调用
 app.add_middleware(

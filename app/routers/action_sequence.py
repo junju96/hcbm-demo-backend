@@ -114,6 +114,7 @@ class DispatchRequest(BaseModel):
     vehicle_ips: Optional[Dict[str, str]] = None
     tid: Optional[int] = None
     vehicle_topic: Optional[str] = "ZD04"
+    vehicle_vid: Optional[str] = None
 
 
 @router.post("/action-sequences/plans/{plan_id}/stop", response_model=ApiResponse)
@@ -197,17 +198,20 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
     if not plan:
         return ApiResponse(code=404, message="Plan not found", data=None)
 
-    vehicle_vid = get_first_vid(plan)
+    vehicle_vid = body.vehicle_vid or get_first_vid(plan)
+    # 去掉 equipment: 前缀（如 equipment:XL01 → XL01）
+    vehicle_vid_clean = vehicle_vid.replace("equipment:", "") if vehicle_vid else vehicle_vid
     payload = build_mission_payload(
         plan,
         vehicle_vmfs=body.vehicle_vmfs,
         vehicle_ips=body.vehicle_ips,
         tid=body.tid,
+        target_vid=vehicle_vid_clean,
     )
-    topic = f"op/t01/g01/v{vehicle_vid}/cmd/MissionService/send_mission"
+    topic = f"op/t01/g01/v{vehicle_vid_clean}/cmd/MissionService/send_mission"
 
     print(f"\n[DISPATCH-OP] ====== 操控端下发开始 ======")
-    print(f"[DISPATCH-OP] plan_id={plan_id} | vehicle_vid={vehicle_vid} | topic={topic}")
+    print(f"[DISPATCH-OP] plan_id={plan_id} | vehicle_vid={vehicle_vid_clean} | topic={topic}")
     print(f"[DISPATCH-OP] mission_payload={json.dumps(payload, ensure_ascii=False, indent=2)}")
 
     ok = zenoh_client.publish(topic, payload)
@@ -223,7 +227,7 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
         "plan_id": plan_id,
         "action": "dispatch",
         "topic": topic,
-        "vehicle_vid": vehicle_vid,
+        "vehicle_vid": vehicle_vid_clean,
         "mission_tid": payload["args"]["mission_data"]["task"]["tid"],
         "message": "任务已通过 Zenoh 下发",
     })
