@@ -132,6 +132,8 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
         plan = data
         car_actions = _build_car_actions_from_plan(plan)
         result = _to_frontend_plan(plan, car_actions)
+        # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
+        action_runtime.init_state_from_plan(plan_id, result)
         # 调试：打印第一个 vehicle 的第一个 action 的字段
         vs = result.get("vehicle_summary", [])
         if vs:
@@ -259,12 +261,14 @@ class ActionSequenceRuntime:
         return copy.deepcopy(self._states[plan_id])
 
     def transit(self, plan_id: str, new_state: str) -> tuple[bool, str]:
-        """尝试状态转移，返回 (success, message)"""
+        """尝试状态转移，返回 (success, message)。支持幂等：当前状态已是目标状态时直接返回成功。"""
         if new_state not in self.VALID_STATES:
             return False, f"非法状态: {new_state}"
 
         self._ensure(plan_id)
         current = self._states[plan_id]["state"]
+        if current == new_state:
+            return True, f"状态已是 {new_state}"
         if new_state not in self.TRANSITIONS.get(current, set()):
             return False, f"不允许从 {current} 转移到 {new_state}"
 
@@ -284,6 +288,37 @@ class ActionSequenceRuntime:
         """重置状态"""
         self._states[plan_id] = {
             "state": "SCHEDULED",
+            "started_at": None,
+            "paused_at": None,
+            "updated_at": None,
+        }
+
+    def init_state_from_plan(self, plan_id: str, plan: Dict[str, Any]):
+        """
+        根据 plan 中的 action 状态推断 plan 整体运行时状态，并初始化内存状态。
+        仅在尚未追踪该 plan 时执行（避免覆盖用户已触发的控制操作）。
+        """
+        if plan_id in self._states:
+            return
+        action_states = set()
+        # 从 car_actions 收集
+        for ca in plan.get("car_actions", []):
+            action_states.add(ca.get("state", "SCHEDULED"))
+        # 从 vehicle_summary 收集
+        for vs in plan.get("vehicle_summary", []):
+            for stage in vs.get("stages", []):
+                for action in stage.get("actions", []):
+                    action_states.add(action.get("state", "SCHEDULED"))
+        # 推断整体状态：有 ACTIVE 则为 ACTIVE；无 ACTIVE 有 PAUSED 则为 PAUSED；全部为 DONE 则为 DONE；否则 SCHEDULED
+        inferred = "SCHEDULED"
+        if "ACTIVE" in action_states:
+            inferred = "ACTIVE"
+        elif "PAUSED" in action_states:
+            inferred = "PAUSED"
+        elif action_states == {"DONE"}:
+            inferred = "DONE"
+        self._states[plan_id] = {
+            "state": inferred,
             "started_at": None,
             "paused_at": None,
             "updated_at": None,
@@ -838,7 +873,10 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     if data is not None and isinstance(data, dict):
         plan = data
         car_actions = _build_car_actions_from_plan(plan)
-        return _to_frontend_plan(plan, car_actions)
+        result = _to_frontend_plan(plan, car_actions)
+        # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
+        action_runtime.init_state_from_plan(plan_id, result)
+        return result
     return None
 
 
