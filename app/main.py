@@ -63,6 +63,14 @@ class RequestLogMiddleware:
             or path.startswith("/api/v1/planning/events")
         )
 
+        # 轮询接口日志开关：设置 SKIP_POLL_LOG=1 可跳过列表/详情查询日志，避免刷屏
+        if os.environ.get("SKIP_POLL_LOG"):
+            import re
+            skip_detail = skip_detail or bool(re.match(
+                r"^/api/v1/action-sequences/(operator/)?plans(/[^/]+)?$",
+                path,
+            ))
+
         # 读取请求体（可重复读取）
         req_body = ""
         if method in ("POST", "PUT", "PATCH") and not skip_detail:
