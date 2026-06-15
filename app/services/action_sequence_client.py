@@ -17,7 +17,8 @@ import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
-from app.services.data_server_client import _http_get, _http_post, _http_get_operator, _http_post_operator
+from app.services.data_server_client import _http_get, _http_post, _http_patch, _http_get_operator, _http_post_operator
+from app.services.task_pool import task_pool
 from app.services import zenoh_client
 
 
@@ -77,7 +78,8 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN（静默模式，不打印日志）"""
+    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN（静默模式，不打印日志）。
+    数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测数据始终合并到列表中。"""
     data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
     items = []
     if data is not None and isinstance(data, list):
@@ -85,6 +87,21 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
     elif data is not None and isinstance(data, dict):
         # 有些接口返回 { items: [...] }
         items = (data.get("items") or data.get("data") or [])[:limit]
+
+    # 合并本地 task_pool 中的 PLAN（主要是 fake 调测方案），确保调试数据始终可见且排在最前
+    local_items = task_pool.query(task_type="PLAN", limit=limit)
+    if not items:
+        print("[AS-DEBUG] query_plans fallback to local task_pool")
+        items = local_items
+    else:
+        server_ids = {
+            (item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""))
+            for item in items
+        }
+        for local_item in local_items:
+            local_id = local_item.get("plan_id") or local_item.get("resource_id", "").replace("plan:", "")
+            if local_id and local_id not in server_ids:
+                items.insert(0, local_item)
 
     result = []
     for idx, item in enumerate(items):
@@ -122,7 +139,7 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
 def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     """
     获取方案详情，并转换为前端行动序列需要的格式（静默模式，不打印日志）。
-    服务器不可达或不存在时返回 None（前端显示空）。
+    数据服务器不可达时回退到本地 task_pool；本地也没有时返回 None。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
@@ -130,23 +147,30 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     if data is not None and isinstance(data, dict):
         # 数据服务端返回的原始数据本身即包含业务字段，无需再提取 raw_payload
         plan = data
-        car_actions = _build_car_actions_from_plan(plan)
-        result = _to_frontend_plan(plan, car_actions)
-        # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
-        action_runtime.init_state_from_plan(plan_id, result)
-        # 调试：打印第一个 vehicle 的第一个 action 的字段
-        vs = result.get("vehicle_summary", [])
-        if vs:
-            first_actions = (vs[0].get("stages") or [{}])[0].get("actions", [])
-            if first_actions:
-                print(f"[AS-DEBUG] plan={plan_id} first_action_keys={list(first_actions[0].keys())} action_type={first_actions[0].get('action_type')}")
-            else:
-                print(f"[AS-DEBUG] plan={plan_id} no actions in first vehicle stage")
-        return result
+        # 同步缓存到本地 task_pool，方便后续 PATCH 更新
+        task_pool.set(rid, plan)
+    else:
+        # 服务器不可达时 fallback 到本地 task_pool（支持 fake 调测数据）
+        print(f"[AS-DEBUG] get_plan_detail fallback to local task_pool, plan_id={plan_id}")
+        plan = task_pool.get(rid)
 
-    # 服务器不可达或 plan 不存在 — 返回 None
-    print(f"[AS-DEBUG] plan={plan_id} data_server returned None or non-dict")
-    return None
+    if plan is None:
+        print(f"[AS-DEBUG] plan={plan_id} not found in data_server or local task_pool")
+        return None
+
+    car_actions = _build_car_actions_from_plan(plan)
+    result = _to_frontend_plan(plan, car_actions)
+    # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
+    action_runtime.init_state_from_plan(plan_id, result)
+    # 调试：打印第一个 vehicle 的第一个 action 的字段
+    vs = result.get("vehicle_summary", [])
+    if vs:
+        first_actions = (vs[0].get("stages") or [{}])[0].get("actions", [])
+        if first_actions:
+            print(f"[AS-DEBUG] plan={plan_id} first_action_keys={list(first_actions[0].keys())} action_type={first_actions[0].get('action_type')}")
+        else:
+            print(f"[AS-DEBUG] plan={plan_id} no actions in first vehicle stage")
+    return result
 
 
 def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -224,6 +248,73 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         "car_actions": car_actions,
         "vehicle_summary": list(vehicle_map.values()),
     }
+
+
+def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
+    """
+    更新 plan 中指定 action 的 param。
+
+    策略：
+      1. 尝试 PATCH 数据服务器（如果数据服务端支持 action param 更新）。
+      2. 无论 PATCH 是否成功，都同步更新本地 task_pool 中的缓存数据，
+         保证 fake 调测数据在服务器不可达时仍可保存编辑结果。
+    """
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+
+    # 1. 最佳努力 PATCH 数据服务器
+    patch_ok = False
+    try:
+        resp = _http_patch(
+            f"/api/v1/task_pool/resources/{rid}/actions/{action_id}",
+            {"action_id": action_id, "param": param},
+            silent=True,
+        )
+        patch_ok = resp is not None
+    except Exception:
+        pass
+
+    # 2. 确保本地 task_pool 中有该 plan 的缓存
+    plan = task_pool.get(rid)
+    if plan is None:
+        data = _http_get(f"/api/v1/task_pool/resources/{rid}", silent=True)
+        if data is not None and isinstance(data, dict):
+            plan = data
+            task_pool.set(rid, plan)
+
+    if plan is None:
+        # 本地没有缓存且服务器不可达，无法更新
+        return patch_ok
+
+    # 3. 在 plan.stages[].team_actions 中查找并更新 action.param
+    updated = False
+    for stage in plan.get("stages", []):
+        team_actions = stage.get("team_actions", {})
+        vehicles: List[Dict[str, Any]] = []
+        if isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                if isinstance(vlist, list):
+                    vehicles.extend(vlist)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles.extend(ta.get("team_actions", []))
+
+        for vehicle in vehicles:
+            for action in vehicle.get("actions", []):
+                if action.get("action_id") == action_id:
+                    action["param"] = copy.deepcopy(param)
+                    updated = True
+                    break
+            if updated:
+                break
+        if updated:
+            break
+
+    if updated:
+        plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+        task_pool.set(rid, plan)
+        print(f"[AS-DEBUG] updated action param locally: plan_id={plan_id} action_id={action_id}")
+
+    return updated or patch_ok
 
 
 # ========== 行动序列运行时状态管理（内存） ==========
@@ -824,7 +915,8 @@ def publish_control_mission(
 
 
 def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
-    """向操控席数据服务器查询行动方案列表 — GET /by_type/PLAN（静默模式）"""
+    """向操控席数据服务器查询行动方案列表 — GET /by_type/PLAN（静默模式）。
+    服务端不可达或为空时回退本地 task_pool；本地 fake 调测数据始终合并。"""
     data = _http_get_operator("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
     items = []
     if data is not None and isinstance(data, list):
@@ -836,6 +928,21 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
         print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
     else:
         print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
+
+    # 合并本地 fake 调测方案，排在最前
+    local_items = task_pool.query(task_type="PLAN", limit=limit)
+    if not items:
+        print("[AS-DEBUG] query_plans_operator fallback to local task_pool")
+        items = local_items
+    else:
+        server_ids = {
+            (item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""))
+            for item in items
+        }
+        for local_item in local_items:
+            local_id = local_item.get("plan_id") or local_item.get("resource_id", "").replace("plan:", "")
+            if local_id and local_id not in server_ids:
+                items.insert(0, local_item)
 
     result = []
     for item in items:
@@ -867,17 +974,24 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
 
 
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
-    """向操控席数据服务器获取方案详情（静默模式）"""
+    """向操控席数据服务器获取方案详情（静默模式）；不可达时回退本地 task_pool。"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
     data = _http_get_operator(f"/api/v1/task_pool/resources/{rid}", silent=True)
     if data is not None and isinstance(data, dict):
         plan = data
-        car_actions = _build_car_actions_from_plan(plan)
-        result = _to_frontend_plan(plan, car_actions)
-        # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
-        action_runtime.init_state_from_plan(plan_id, result)
-        return result
-    return None
+        task_pool.set(rid, plan)
+    else:
+        print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
+        plan = task_pool.get(rid)
+
+    if plan is None:
+        return None
+
+    car_actions = _build_car_actions_from_plan(plan)
+    result = _to_frontend_plan(plan, car_actions)
+    # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
+    action_runtime.init_state_from_plan(plan_id, result)
+    return result
 
 
 def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
