@@ -162,11 +162,39 @@ def preload_mock_data(task_pool):
 
 
 def _build_fake_action_sequence_plan():
-    """构造包含所有车型/所有行动类型的 fake PLAN，用于行动序列参数弹窗调试。"""
+    """构造包含底盘/火力/侦打/巡逻/电磁全部元任务的 fake PLAN。
+
+    约定：
+      - action_type 统一全小写，按协议名称命名；
+      - 不保留整车模式、自定义打击、通信中继车；
+      - param 字段与协议 service 字段对齐，便于直接下发转换。
+    """
 
     plan_id = "FAKE_ACTION_SEQUENCE_001"
     stage_id = "STAGE_FAKE_001"
     team_id = "TEAM_ALL"
+
+    # 调测区域/目标坐标
+    area_a = [
+        {"lon": 116.1300000, "lat": 39.7680000, "alt": 55.0},
+        {"lon": 116.1320000, "lat": 39.7680000, "alt": 55.0},
+        {"lon": 116.1320000, "lat": 39.7660000, "alt": 55.0},
+        {"lon": 116.1300000, "lat": 39.7660000, "alt": 55.0},
+    ]
+
+    target_point = {
+        "target_ref": "target:target-1",
+        "lon": 118.208500,
+        "lat": 39.864200,
+        "alt": 95.0,
+        "tart": 6,
+        "attr": 1,
+        "thr": 80,
+        "dam": 1,
+        "blk": 2,
+        "figt": 2,
+        "sug": 3,
+    }
 
     base_action = {
         "task_type": "ACTION",
@@ -176,7 +204,7 @@ def _build_fake_action_sequence_plan():
         "state": "SCHEDULED",
     }
 
-    def move_action(aid, name, vid, seq):
+    def action(aid, name, vid, seq, action_type, description, param):
         return {
             **base_action,
             "resource_id": f"action:{aid}",
@@ -184,126 +212,316 @@ def _build_fake_action_sequence_plan():
             "name": name,
             "vid": vid,
             "action_seq": seq,
-            "description": "沿指定目标点或路径进行自主机动",
-            "action_type": "Auto-Move",
-            "param": {
-                "waypoints": [
-                    {"lat": 39.75, "lon": 116.11, "alt": 51.4},
-                    {"lat": 39.756, "lon": 116.118, "alt": 49.84},
-                ],
-                "speed": 20,
-            },
-        }
-
-    def lens_action(aid, name, vid, seq):
-        return {
-            **base_action,
-            "resource_id": f"action:{aid}",
-            "action_id": aid,
-            "name": name,
-            "vid": vid,
-            "action_seq": seq,
-            "description": "使用白光侦察传感器对目标进行侦察",
-            "action_type": "Lens-Recon",
-            "param": {
-                "target_id": "target_001",
-                "target_name": "区域A",
-                "type": 2,
-                "recon_position": {"lon": 116.134131, "lat": 39.766476, "alt": 100.0},
-                "azimuth_deg": 346.0,
-                "fov_deg": 165.1,
-                "move_time_s": 828.8,
-                "scan_time_s": 55.0,
-            },
-        }
-
-    def strike_action(aid, name, vid, seq, action_type):
-        return {
-            **base_action,
-            "resource_id": f"action:{aid}",
-            "action_id": aid,
-            "name": name,
-            "vid": vid,
-            "action_seq": seq,
-            "description": f"使用{action_type}载荷进行目标打击",
+            "description": description,
             "action_type": action_type,
-            "param": {
-                "target_id": "target_001",
-                "target_name": "区域A",
-                "fire_duration_s": 6,
-                "fire_position": {"lon": 116.108, "lat": 39.749},
-                "fire_mode": 1,
-                "damage_mode": 1,
-                "blank": 0,
-                "planned_ammo": 10,
-            },
+            "param": param,
         }
 
-    def relay_action(aid, name, vid, seq, action_type):
-        return {
-            **base_action,
-            "resource_id": f"action:{aid}",
-            "action_id": aid,
-            "name": name,
-            "vid": vid,
-            "action_seq": seq,
-            "description": "与地面/空中通信载荷进行通信中继",
-            "action_type": action_type,
-            "param": {
-                "duration_s": 900,
-                "ip": "192.168.168.100",
-                "type": 1,
-            },
-        }
-
-    # 侦察打击无人车
-    recon_strike_vid = "equipment:recon-strike-01"
-    recon_strike_actions = [
-        move_action("RS_MOVE", "自主机动", recon_strike_vid, 1),
-        lens_action("RS_LENS", "光电侦察", recon_strike_vid, 2),
-        strike_action("RS_40MM", "40mm机炮打击", recon_strike_vid, 3, "40mm-Gun-Launch"),
-        {
-            **base_action,
-            "resource_id": "action:RS_SEARCH_SHOOT",
-            "action_id": "RS_SEARCH_SHOOT",
-            "name": "侦察打击",
-            "vid": recon_strike_vid,
-            "action_seq": 4,
-            "description": "区域自主侦察，发现目标后立即自主打击",
-            "action_type": "search-and-shoot",
-            "param": {
-                "target_id": "target_001",
-                "target_name": "区域A",
-                "time": 10.0,
-            },
-        },
+    # ---------- 底盘类 ----------
+    chassis_vid = "equipment:chassis-01"
+    path_points = [
+        {"lon": 116.1278530, "lat": 39.7658100, "alt": 52.95, "radius": -1, "type": 1},
+        {"lon": 116.1286534, "lat": 39.7662105, "alt": 53.20, "radius": -1, "type": 1},
+        {"lon": 116.1294731, "lat": 39.7667975, "alt": 53.72, "radius": -1, "type": 2},
+    ]
+    formation_points = [
+        {"lon": 116.1278530, "lat": 39.7658100, "alt": 52.95, "offsetX": 5, "offsetY": -3},
+        {"lon": 116.1286534, "lat": 39.7662105, "alt": 53.20, "offsetX": 5, "offsetY": -3},
+    ]
+    chassis_actions = [
+        action("CH_MOVE", "自主机动", chassis_vid, 1, "auto-move",
+               "沿指定目标点或路径进行自主机动", {
+                   "route_id": "route:route-001",
+                   "points": path_points,
+                   "limited_speed": 20,
+                   "safe_mode": 0,
+                   "loop_mode": 0,
+               }),
+        action("CH_FOLLOW", "跟随机动", chassis_vid, 2, "follow-move",
+               "跟随目标进行机动", {
+                   "x": 960,
+                   "y": 540,
+                   "width": 1920,
+                   "height": 1080,
+                   "distance": 10,
+                   "limited_speed": 15,
+                   "safe_mode": 0,
+                   "strategy": 0,
+               }),
+        action("CH_SILENT", "静默值守", chassis_vid, 3, "silent-guard",
+               "在指定位置静默值守", {
+                   "time": 300,
+               }),
+        action("CH_SET_RETURN", "设置返航点", chassis_vid, 4, "set-return-point",
+               "设置当前位置为返航点", {}),
+        action("CH_RETURN", "开启返航", chassis_vid, 5, "return-to-base",
+               "返回已设置的返航点", {}),
+        action("CH_FORMATION", "编队机动", chassis_vid, 6, "formation-move",
+               "按编队队形跟随头车机动", {
+                   "points": formation_points,
+                   "limited_speed": 18,
+                   "formation_mode": 0,
+                   "safe_mode": 0,
+               }),
+        action("CH_MANUAL", "人工任务", chassis_vid, 7, "manual-task",
+               "人工介入任务", {
+                   "type": 1,
+               }),
+        action("CH_POSE", "姿态调整", chassis_vid, 8, "pose-adjust",
+               "调整车辆姿态", {
+                   "pose": [9000, 0, 0],
+                   "pose_deviation": [36100, 9100, 9100],
+                   "limited_speed": 10,
+                   "safe_mode": 0,
+               }),
     ]
 
-    # 火力支援无人车
+    # ---------- 火力车载荷 ----------
     fire_support_vid = "equipment:fire-support-01"
     fire_support_actions = [
-        move_action("FS_MOVE", "自主机动", fire_support_vid, 1),
-        lens_action("FS_LENS", "光电侦察", fire_support_vid, 2),
-        strike_action("FS_GUN", "机枪打击", fire_support_vid, 3, "7.62mm-Gun-Shot"),
-        strike_action("FS_AT", "反坦克导弹打击", fire_support_vid, 4, "AT-Missile-Launch"),
-        strike_action("FS_ROCKET", "火箭弹打击", fire_support_vid, 5, "Rocket-Launch"),
-        strike_action("FS_LOITER", "巡飞弹打击", fire_support_vid, 6, "Loitering-Munition-Launch"),
+        action("FS_LENS", "光电侦察", fire_support_vid, 1, "lens-recon",
+               "使用白光/红外侦察传感器对目标区域进行侦察", {
+                   "type": 2,
+                   "mode": 3,
+                   "time": 120,
+                   "area_id": "area:area-001",
+                   "area": area_a,
+                   "direct": {
+                       "type": 1,
+                       "cent": 9000,
+                       "sear": 6000,
+                       "up": 3000,
+                       "down": -1000,
+                       "dist": 2000,
+                       "sens": 0,
+                   },
+               }),
+        action("FS_RECON_STRIKE", "侦察打击", fire_support_vid, 2, "recon-strike",
+               "区域自主侦察，发现目标后立即自主打击", {
+                   "time": 180,
+                   "area_id": "area:area-001",
+                   "area": area_a[:2],
+               }),
+        action("FS_GUN", "机枪打击", fire_support_vid, 3, "gun-shot",
+               "使用机枪对目标点进行打击", {
+                   "time": 30,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
+        action("FS_ROCKET", "火箭弹打击", fire_support_vid, 4, "rocket-launch",
+               "使用火箭弹对目标点/区域进行打击", {
+                   "type": 1,
+                   "time": 60,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
+        action("FS_LOITER", "巡飞弹打击", fire_support_vid, 5, "loitering-munition-launch",
+               "发射巡飞弹对目标点进行打击", {
+                   "time": 60,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
     ]
 
-    # 巡逻无人车
+    # ---------- 侦打车载荷 ----------
+    recon_strike_vid = "equipment:recon-strike-01"
+    recon_strike_actions = [
+        action("RS_LENS", "光电侦察", recon_strike_vid, 1, "lens-recon",
+               "使用白光/红外侦察传感器对目标区域进行侦察", {
+                   "type": 2,
+                   "mode": 3,
+                   "time": 120,
+                   "area_id": "area:area-001",
+                   "area": area_a,
+                   "direct": {
+                       "type": 1,
+                       "cent": 9000,
+                       "sear": 6000,
+                       "up": 3000,
+                       "down": -1000,
+                       "dist": 2000,
+                       "sens": 0,
+                   },
+               }),
+        action("RS_RECON_STRIKE", "侦察打击", recon_strike_vid, 2, "recon-strike",
+               "区域自主侦察，发现目标后立即自主打击", {
+                   "time": 180,
+                   "area_id": "area:area-001",
+                   "area": area_a[:2],
+               }),
+        action("RS_40MM", "40炮打击", recon_strike_vid, 3, "40mm-gun-launch",
+               "使用40炮对目标点进行打击", {
+                   "time": 45,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
+        action("RS_AT", "红箭13导弹打击", recon_strike_vid, 4, "at-missile-launch",
+               "使用红箭13反坦克导弹对目标点进行打击", {
+                   "time": 60,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [{**target_point, "alt": 2100}],
+               }),
+        action("RS_GUN", "机枪打击", recon_strike_vid, 5, "gun-shot",
+               "使用机枪对目标点进行打击", {
+                   "time": 30,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
+        action("RS_LASER", "激光照射", recon_strike_vid, 6, "laser-illumination",
+               "对目标点进行激光照射引导", {
+                   "time": 120,
+                   "act": 1,
+                   "param1": 0,
+                   "param2": 0,
+                   "ene": 80,
+                   "freq": 1000,
+                   "meat": 30,
+                   "delay": 5,
+                   "max": 10,
+                   "type": 1,
+                   "strategy": 0,
+                   "lon": 116.407000,
+                   "lat": 39.904000,
+                   "alt": 2100,
+               }),
+    ]
+
+    # ---------- 巡逻车载荷 ----------
     patrol_vid = "equipment:patrol-01"
     patrol_actions = [
-        move_action("PT_MOVE", "自主机动", patrol_vid, 1),
-        lens_action("PT_LENS", "光电侦察", patrol_vid, 2),
-        strike_action("PT_GUN", "机枪打击", patrol_vid, 3, "7.62mm-Gun-Shot"),
+        action("PT_LENS", "光电侦察", patrol_vid, 1, "lens-recon",
+               "使用白光/红外侦察传感器对目标区域进行侦察", {
+                   "type": 2,
+                   "mode": 3,
+                   "time": 120,
+                   "area_id": "area:area-001",
+                   "area": area_a,
+                   "direct": {
+                       "type": 1,
+                       "cent": 9000,
+                       "sear": 6000,
+                       "up": 3000,
+                       "down": -1000,
+                       "dist": 2000,
+                       "sens": 0,
+                   },
+               }),
+        action("PT_RECON_STRIKE", "巡逻车侦察打击", patrol_vid, 2, "recon-strike",
+               "区域巡逻侦察并打击发现目标", {
+                   "time": 180,
+                   "tarty": 6,
+                   "attr": 1,
+                   "thr": 80,
+                   "dam": 1,
+                   "blk": 2,
+                   "figt": 2,
+                   "sug": 3,
+                   "ammo": 10,
+                   "strategy": 0,
+                   "area_id": "area:area-001",
+                   "area": area_a[:2],
+               }),
+        action("PT_GUN", "机枪打击", patrol_vid, 3, "gun-shot",
+               "使用机枪对目标点进行打击", {
+                   "time": 30,
+                   "sort": 1,
+                   "num": 1,
+                   "points": [target_point],
+               }),
+        action("PT_ACOUSTIC", "强声拒止", patrol_vid, 4, "acoustic-deterrence",
+               "对目标区域实施强声拒止", {
+                   "time": 60,
+                   "tarty": 1,
+                   "attr": 2,
+                   "thr": 50,
+                   "dam": 0,
+                   "blk": 0,
+                   "figt": 0,
+                   "sug": 0,
+                   "ammo": 0,
+                   "strategy": 0,
+                   "area_id": "area:area-001",
+                   "area": area_a[:1],
+               }),
+        action("PT_LIGHT", "强光拒止", patrol_vid, 5, "light-deterrence",
+               "对目标区域实施强光拒止", {
+                   "time": 60,
+                   "tarty": 1,
+                   "attr": 2,
+                   "thr": 50,
+                   "dam": 0,
+                   "blk": 0,
+                   "figt": 0,
+                   "sug": 0,
+                   "ammo": 0,
+                   "strategy": 0,
+                   "area_id": "area:area-001",
+                   "area": area_a[:1],
+               }),
     ]
 
-    # 通信无人车
-    comm_vid = "equipment:communication-01"
-    comm_actions = [
-        move_action("CM_MOVE", "自主机动", comm_vid, 1),
-        relay_action("CM_LAND_RELAY", "地面通信中继", comm_vid, 2, "Land-Communication-Relay"),
-        relay_action("CM_AIR_RELAY", "空中通信中继", comm_vid, 3, "Air-Communication-Relay"),
+    # ---------- 电磁车载荷 ----------
+    electronic_vid = "equipment:electronic-01"
+    frequency = [{"start": 30000000, "end": 18000000000}]
+    protect = {
+        "ckl_dp": "30.0,100.0",
+        "ckl_tp": "100.0,200.0",
+        "zzw_dp": "400.0,500.0",
+        "zzw_tp": "500.0,600.0",
+        "xtl_tp": "700.0,800.0",
+        "xtl_dp": "800.0,900.0",
+    }
+    electronic_actions = [
+        action("EL_RECON", "电磁侦察", electronic_vid, 1, "electronic-recon",
+               "对目标区域实施电磁频谱侦察", {
+                   "mode": 3,
+                   "time": 300,
+                   "num": 1,
+                   "freqtype": 62,
+                   "frequency": frequency,
+                   "area_id": "area:area-001",
+                   "area": area_a,
+                   "direct": {
+                       "type": 1,
+                       "cent": 9000,
+                       "sear": 6000,
+                       "up": 3000,
+                       "down": -1000,
+                       "dist": 2000,
+                       "sens": 0,
+                   },
+               }),
+        action("EL_JAM", "电磁突击", electronic_vid, 2, "electronic-jamming",
+               "对目标区域实施电磁干扰压制", {
+                   "mode": 3,
+                   "time": 300,
+                   "sort": 1,
+                   "num": 1,
+                   "freqtype": 62,
+                   "frequency": frequency,
+                   "area_id": "area:area-001",
+                   "area": area_a,
+                   "direct": {
+                       "type": 1,
+                       "cent": 9000,
+                       "sear": 6000,
+                       "up": 3000,
+                       "down": -1000,
+                       "dist": 2000,
+                       "sens": 0,
+                   },
+                   "protect": protect,
+               }),
+        action("EL_SILENT", "载荷静默", electronic_vid, 3, "payload-silent",
+               "载荷进入静默状态", {
+                   "time": 300,
+               }),
     ]
 
     return {
@@ -311,19 +529,20 @@ def _build_fake_action_sequence_plan():
         "task_type": "PLAN",
         "plan_id": plan_id,
         "title": "行动序列参数调测方案",
-        "description": "包含全部车型及其支持的全部行动类型，用于行动序列参数弹窗调试",
+        "description": "包含底盘、火力、侦打、巡逻、电磁五类车型的全部协议元任务（不含整车模式、自定义打击、通信中继车）",
         "state": "DRAFT",
         "teams": [
             {
                 "team_id": team_id,
                 "name": "综合调测组",
-                "description": "包含全部车型的调测编组",
+                "description": "包含底盘、火力、侦打、巡逻、电磁五类车型的调测编组",
                 "state": "READY",
                 "vehicles": [
-                    {"vid": recon_strike_vid, "resource_type": "Recon-Strike-UGV"},
+                    {"vid": chassis_vid, "resource_type": "Chassis-UGV"},
                     {"vid": fire_support_vid, "resource_type": "Fire-Support-UGV"},
+                    {"vid": recon_strike_vid, "resource_type": "Recon-Strike-UGV"},
                     {"vid": patrol_vid, "resource_type": "Patrol-UGV"},
-                    {"vid": comm_vid, "resource_type": "Communication-UGV"},
+                    {"vid": electronic_vid, "resource_type": "Electronic-UGV"},
                 ],
             }
         ],
@@ -340,36 +559,17 @@ def _build_fake_action_sequence_plan():
                 "stage_id": stage_id,
                 "title": "全行动类型调测阶段",
                 "stage_seq": 1,
-                "description": "依次执行所有车型的全部行动类型",
+                "description": "依次执行所有车型支持的全部协议元任务",
                 "team_ids": [team_id],
                 "target_ids": ["target:AREA_A"],
                 "state": "SCHEDULED",
                 "team_actions": {
                     team_id: [
-                        {
-                            "vid": recon_strike_vid,
-                            "state": "SCHEDULED",
-                            "action_type": "",
-                            "actions": recon_strike_actions,
-                        },
-                        {
-                            "vid": fire_support_vid,
-                            "state": "SCHEDULED",
-                            "action_type": "",
-                            "actions": fire_support_actions,
-                        },
-                        {
-                            "vid": patrol_vid,
-                            "state": "SCHEDULED",
-                            "action_type": "",
-                            "actions": patrol_actions,
-                        },
-                        {
-                            "vid": comm_vid,
-                            "state": "SCHEDULED",
-                            "action_type": "",
-                            "actions": comm_actions,
-                        },
+                        {"vid": chassis_vid, "state": "SCHEDULED", "action_type": "", "actions": chassis_actions},
+                        {"vid": fire_support_vid, "state": "SCHEDULED", "action_type": "", "actions": fire_support_actions},
+                        {"vid": recon_strike_vid, "state": "SCHEDULED", "action_type": "", "actions": recon_strike_actions},
+                        {"vid": patrol_vid, "state": "SCHEDULED", "action_type": "", "actions": patrol_actions},
+                        {"vid": electronic_vid, "state": "SCHEDULED", "action_type": "", "actions": electronic_actions},
                     ]
                 },
             }
