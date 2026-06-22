@@ -423,6 +423,96 @@ action_runtime = ActionSequenceRuntime()
 # ==================== Plan → MissionService mission_data 转换 ====================
 
 
+def _resource_type_to_vehicle_type(resource_type: str) -> str:
+    """把 plan.teams[].vehicles[].resource_type 归一化为内部车型标识"""
+    rt = (resource_type or "").strip().lower().replace("-", "_")
+    mapping = {
+        "chassis_ugv": "chassis",
+        "fire_support_ugv": "fire_support",
+        "recon_strike_ugv": "recon_strike",
+        "patrol_ugv": "patrol",
+        "electronic_ugv": "electronic",
+        "communication_ugv": "communication",
+    }
+    return mapping.get(rt, "")
+
+
+def _build_vid_vehicle_type_map(plan: Dict[str, Any]) -> Dict[str, str]:
+    """从 plan.teams 建立 vid -> vehicle_type 映射"""
+    result: Dict[str, str] = {}
+    for team in plan.get("teams", []) or []:
+        if not isinstance(team, dict):
+            continue
+        for v in team.get("vehicles", []) or []:
+            if isinstance(v, dict) and v.get("vid"):
+                result[v["vid"]] = _resource_type_to_vehicle_type(v.get("resource_type", ""))
+        if team.get("vid"):
+            result[team["vid"]] = _resource_type_to_vehicle_type(team.get("resource_type", ""))
+    return result
+
+
+def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
+    """根据车型 + action_type 解析协议 sid；无法解析时 fallback 到名称关键词推断"""
+    t = (action_type or "").strip().lower()
+    vt = (vehicle_type or "").strip().lower()
+
+    # 底盘类（所有车型通用）
+    chassis_map = {
+        "auto-move": 1,
+        "follow-move": 2,
+        "silent-guard": 4,
+        "set-return-point": 5,
+        "return-to-base": 6,
+        "formation-move": 7,
+        "manual-task": 8,
+        "pose-adjust": 9,
+    }
+    if t in chassis_map:
+        return chassis_map[t]
+
+    # 火力车 (sid 20~26，不含整车模式/自定义打击)
+    if vt == "fire_support":
+        return {
+            "lens-recon": 21,
+            "recon-strike": 22,
+            "rocket-launch": 23,
+            "loitering-munition-launch": 24,
+            "gun-shot": 25,
+        }.get(t)
+
+    # 侦打车 (sid 30~37，不含整车模式/自定义打击)
+    if vt == "recon_strike":
+        return {
+            "lens-recon": 31,
+            "recon-strike": 32,
+            "40mm-gun-launch": 33,
+            "at-missile-launch": 34,
+            "gun-shot": 35,
+            "laser-illumination": 36,
+        }.get(t)
+
+    # 巡逻车 (sid 50~56，不含整车模式/自定义打击)
+    if vt == "patrol":
+        return {
+            "lens-recon": 51,
+            "recon-strike": 52,
+            "gun-shot": 53,
+            "acoustic-deterrence": 54,
+            "light-deterrence": 55,
+        }.get(t)
+
+    # 电磁车 (sid 40~48，不含整车模式)
+    if vt == "electronic":
+        return {
+            "electronic-recon": 41,
+            "electronic-jamming": 42,
+            "payload-silent": 48,
+        }.get(t)
+
+    # fallback：按名称关键词推断
+    return _action_name_to_sid(name)
+
+
 def _action_name_to_sid(name: str) -> int:
     """根据 action 名称关键词推断元任务 sid"""
     if not name:
@@ -430,118 +520,152 @@ def _action_name_to_sid(name: str) -> int:
     n = name.lower()
     if "静默" in n or "值守" in n or "驻守" in n:
         return 4
+    if "设置返航点" in n:
+        return 5
     if "返航" in n or "返回基地" in n or "回基地" in n:
         return 6
     if "人工" in n or "保障" in n:
         return 8
-    if "设置返航点" in n or "返航点" in n:
-        return 5
     if "跟随" in n:
         return 2
     if "编队" in n:
         return 7
-    if "姿态" in n or "转向" in n:
+    if "姿态" in n or "转向" in n or "车姿" in n:
         return 9
+    if "40炮" in n or "40mm" in n:
+        return 33
+    if "红箭" in n or "导弹" in n:
+        return 34
+    if "激光" in n or "照射" in n:
+        return 36
+    if "强声" in n:
+        return 54
+    if "强光" in n:
+        return 55
+    if "电磁侦察" in n or "电侦" in n:
+        return 41
+    if "电磁" in n or "干扰" in n or "突击" in n:
+        return 42
+    if "载荷静默" in n:
+        return 48
+    if "火箭" in n:
+        return 23
+    if "巡飞" in n:
+        return 24
+    if "机枪" in n or "枪" in n:
+        return 25
+    if "侦察打击" in n or "搜索打击" in n:
+        return 22
+    if "光电" in n or "白光" in n or "红外" in n:
+        return 21
     # 默认：自主机动
     return 1
 
 
-def _build_service_from_action(action: Dict[str, Any]) -> Dict[str, Any]:
+def _to_int_scaled(value, scale: float = 1.0) -> int:
+    try:
+        return int(float(value or 0) * scale)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_path_points(points):
+    """自主机动/编队机动路径点：lon/lat 缩放 1e6，alt 缩放 10"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        result.append({
+            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
+            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
+            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "radius": pt.get("radius", -1),
+            "type": pt.get("type", 1),
+        })
+    return result
+
+
+def _build_area_points(points):
+    """侦察/电磁区域点：lon/lat 缩放 1e6，alt 缩放 10"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        result.append({
+            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
+            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
+            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+        })
+    return result
+
+
+def _build_strike_points(points):
+    """打击类目标点公共字段"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        result.append({
+            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
+            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
+            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "tart": pt.get("tart", 0),
+            "attr": pt.get("attr", 0),
+            "thr": pt.get("thr", 0),
+            "dam": pt.get("dam", 0),
+            "blk": pt.get("blk", 0),
+            "figt": pt.get("figt", 0),
+            "sug": pt.get("sug", 0),
+        })
+    return result
+
+
+def _build_direct(direct):
+    """定向探测参数"""
+    if not isinstance(direct, dict):
+        return None
+    return {
+        "type": direct.get("type", 1),
+        "cent": direct.get("cent", 36100),
+        "sear": direct.get("sear", 36100),
+        "up": direct.get("up", 9999),
+        "down": direct.get("down", 9999),
+        "dist": direct.get("dist", 9999),
+        "sens": direct.get("sens", 0),
+    }
+
+
+def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -> Dict[str, Any]:
     """将单个 action 转换为 mission_data act.service"""
     name = action.get("name", "")
     description = action.get("description", "")
     param = action.get("param") or {}
-    waypoints = param.get("waypoints") if isinstance(param, dict) else None
-
-    # 根据 action_type 推断 sid；未匹配时默认 1
     action_type = (action.get("action_type") or "").strip()
-    ACTION_TYPE_TO_SID = {
-        "Lens-Recon": 21,
-        "Auto-Move": 1,
-        "7.62mm-Gun-Shot": 25,
-        "AT-Missile-Launch": 26,
-        "Rocket-Launch": 23,
-        "Loitering-Munition-Launch": 24,
-    }
-    sid = ACTION_TYPE_TO_SID.get(action_type)
-    if sid is None:
-        sid = _action_name_to_sid(name)
 
-    # sid = 1: 自主机动 — 优先使用 waypoints
-    if sid == 1 and waypoints and isinstance(waypoints, list) and len(waypoints) >= 2:
-        points = []
-        for wp in waypoints:
-            if isinstance(wp, dict):
-                # 兼容两种字段名: longitude/latitude/altitude 和 lon/lat/alt
-                lon = wp.get("longitude") if wp.get("longitude") is not None else wp.get("lon", 0)
-                lat = wp.get("latitude") if wp.get("latitude") is not None else wp.get("lat", 0)
-                alt = wp.get("altitude") if wp.get("altitude") is not None else wp.get("alt", 0)
-                points.append({
-                    "lon": int(float(lon) * 1e6),
-                    "lat": int(float(lat) * 1e6),
-                    "alt": int(float(alt or 0) * 10),
-                    "radius": wp.get("radius", -1),
-                    "type": wp.get("type", 1),
-                })
-        if len(points) >= 2:
-            return {
-                "sid": 1,
-                "points": points,
-                "limited_speed": param.get("limited_speed", 20),
-                "safe_mode": param.get("safe_mode", 0),
-                "loop_mode": param.get("loop_mode", 0),
-            }
-        # waypoints 不足 2 个，fallback 到默认 sid=1（空 points 或占位）
-        return {
-            "sid": 1,
-            "points": [
-                {"lon": 116397128, "lat": 39909231, "alt": 435, "radius": -1, "type": 1},
-                {"lon": 116397500, "lat": 39909500, "alt": 435, "radius": -1, "type": 1},
-            ],
-            "limited_speed": 20,
-            "safe_mode": 0,
-            "loop_mode": 0,
-        }
+    sid = _resolve_sid(vehicle_type, action_type, name)
 
-    # sid = 1 但没有 waypoints — 用描述中的坐标或默认值
+    # sid = 1: 自主机动 / 循迹机动
     if sid == 1:
-        # 尝试从 description 提取坐标（简易正则）
-        coords = re.findall(r"([\d.]+)[°\s]*([NSns])?[,\s]*([\d.]+)[°\s]*([EWew])?", description)
-        points = []
-        for m in coords:
-            try:
-                lat = float(m[0])
-                lon = float(m[2])
-                if m[1] and m[1].upper() == "S":
-                    lat = -lat
-                if m[3] and m[3].upper() == "W":
-                    lon = -lon
-                points.append({"lon": int(lon * 1e6), "lat": int(lat * 1e6), "alt": 435, "radius": -1, "type": 1})
-            except Exception:
-                pass
-        if len(points) >= 2:
-            return {"sid": 1, "points": points, "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
-        # 默认占位点
-        return {
-            "sid": 1,
-            "points": [
+        points = _build_path_points(param.get("points"))
+        if len(points) < 2:
+            # fallback：兼容旧 waypoints 字段或占位
+            wps = param.get("waypoints")
+            if isinstance(wps, list) and len(wps) >= 2:
+                points = _build_path_points(wps)
+        if len(points) < 2:
+            points = [
                 {"lon": 116397128, "lat": 39909231, "alt": 435, "radius": -1, "type": 1},
                 {"lon": 116397500, "lat": 39909500, "alt": 435, "radius": -1, "type": 1},
-            ],
-            "limited_speed": 20,
-            "safe_mode": 0,
-            "loop_mode": 0,
+            ]
+        return {
+            "sid": 1,
+            "points": points,
+            "limited_speed": param.get("limited_speed", 20),
+            "safe_mode": param.get("safe_mode", 0),
+            "loop_mode": param.get("loop_mode", 0),
         }
 
-    if sid == 4:
-        return {"sid": 4, "time": param.get("time", 20)}
-
-    if sid == 5:
-        return {"sid": 5}
-
-    if sid == 6:
-        return {"sid": 6}
-
+    # sid = 2: 跟随机动
     if sid == 2:
         return {
             "sid": 2,
@@ -549,74 +673,185 @@ def _build_service_from_action(action: Dict[str, Any]) -> Dict[str, Any]:
             "y": param.get("y", 540),
             "width": param.get("width", 1920),
             "height": param.get("height", 1080),
+            "distance": param.get("distance", 10),
             "limited_speed": param.get("limited_speed", 15),
             "safe_mode": param.get("safe_mode", 0),
             "strategy": param.get("strategy", 0),
         }
 
+    # sid = 4: 静默值守
+    if sid == 4:
+        return {"sid": 4, "time": param.get("time", 300)}
+
+    # sid = 5: 设置返航点
+    if sid == 5:
+        return {"sid": 5}
+
+    # sid = 6: 开启返航
+    if sid == 6:
+        return {"sid": 6}
+
+    # sid = 7: 编队机动
     if sid == 7:
         return {
             "sid": 7,
-            "points": param.get("points", []),
+            "points": _build_path_points(param.get("points")),
             "limited_speed": param.get("limited_speed", 20),
             "formation_mode": param.get("formation_mode", 0),
             "safe_mode": param.get("safe_mode", 0),
         }
 
+    # sid = 8: 人工任务
+    if sid == 8:
+        return {"sid": 8, "type": param.get("type", 1)}
+
+    # sid = 9: 姿态调整 / 车姿调整
     if sid == 9:
         return {
             "sid": 9,
             "pose": param.get("pose", [9000, 0, 0]),
-            "pose_deviation": param.get("pose_deviation", [100, 100, 100]),
-            "limited_speed": param.get("limited_speed", 10),
+            "pose_deviation": param.get("pose_deviation", [36100, 9100, 9100]),
+            "limitd_speed": param.get("limited_speed", 10),
             "safe_mode": param.get("safe_mode", 0),
         }
 
-    if sid == 8:
-        return {"sid": 8, "type": param.get("type", 1)}
+    # sid = 21/31/51: 光电侦察
+    if sid in (21, 31, 51):
+        service = {
+            "sid": sid,
+            "type": param.get("type", 2),
+            "mode": param.get("mode", 3),
+            "time": param.get("time", 120),
+            "area": _build_area_points(param.get("area")),
+        }
+        direct = _build_direct(param.get("direct"))
+        if direct and param.get("mode") == 4:
+            service["direct"] = direct
+        return service
 
-    if sid == 21:
-        # Lens-Recon: 光学侦察 — 从 param 中提取坐标（兼容 waypoints / recon_position / fire_position 等）
-        points = []
-        if isinstance(param, dict):
-            # 1) 优先 waypoints 列表
-            wps = param.get("waypoints")
-            if isinstance(wps, list) and wps:
-                for wp in wps:
-                    if isinstance(wp, dict):
-                        lon = wp.get("longitude") if wp.get("longitude") is not None else wp.get("lon", 0)
-                        lat = wp.get("latitude") if wp.get("latitude") is not None else wp.get("lat", 0)
-                        alt = wp.get("altitude") if wp.get("altitude") is not None else wp.get("alt", 0)
-                        points.append({
-                            "lon": int(float(lon) * 1e6),
-                            "lat": int(float(lat) * 1e6),
-                            "alt": int(float(alt or 0) * 10),
-                            "radius": wp.get("radius", -1),
-                            "type": wp.get("type", 1),
-                        })
-            # 2) 没有 waypoints 则尝试单点坐标字段
-            if not points:
-                for key in ("recon_position", "fire_position", "target_position", "position"):
-                    pos = param.get(key)
-                    if isinstance(pos, dict):
-                        lon = pos.get("longitude") if pos.get("longitude") is not None else pos.get("lon", 0)
-                        lat = pos.get("latitude") if pos.get("latitude") is not None else pos.get("lat", 0)
-                        alt = pos.get("altitude") if pos.get("altitude") is not None else pos.get("alt", 0)
-                        points.append({
-                            "lon": int(float(lon) * 1e6),
-                            "lat": int(float(lat) * 1e6),
-                            "alt": int(float(alt or 0) * 10),
-                            "radius": pos.get("radius", -1),
-                            "type": pos.get("type", 1),
-                        })
-                        break
+    # sid = 22/32: 侦察打击（火力车/侦打车）
+    if sid in (22, 32):
         return {
-            "sid": 21,
-            "points": points,
-            "limited_speed": param.get("limited_speed", 20),
-            "safe_mode": param.get("safe_mode", 0),
-            "loop_mode": param.get("loop_mode", 0),
+            "sid": sid,
+            "time": param.get("time", 180),
+            "area": _build_area_points(param.get("area")),
         }
+
+    # sid = 52: 巡逻车侦察打击
+    if sid == 52:
+        return {
+            "sid": 52,
+            "time": param.get("time", 180),
+            "tarty": param.get("tarty", 0),
+            "attr": param.get("attr", 0),
+            "thr": param.get("thr", 0),
+            "dam": param.get("dam", 0),
+            "blk": param.get("blk", 0),
+            "figt": param.get("figt", 0),
+            "sug": param.get("sug", 0),
+            "ammo": param.get("ammo", 0),
+            "strategy": param.get("strategy", 0),
+            "area": _build_area_points(param.get("area")),
+        }
+
+    # sid = 23/24/25/33/35/53: 各类打击（公共字段）
+    if sid in (23, 24, 25, 33, 35, 53):
+        service = {
+            "sid": sid,
+            "time": param.get("time", 60),
+            "sort": param.get("sort", 0),
+            "num": param.get("num", len(param.get("points", [])) or 1),
+            "points": _build_strike_points(param.get("points")),
+        }
+        # 火箭弹支持区域打击 type 字段
+        if sid == 23:
+            service["type"] = param.get("type", 1)
+        return service
+
+    # sid = 34: 红箭 13 导弹打击
+    if sid == 34:
+        return {
+            "sid": 34,
+            "time": param.get("time", 60),
+            "sort": param.get("sort", 1),
+            "num": param.get("num", len(param.get("points", [])) or 1),
+            "points": _build_strike_points(param.get("points")),
+        }
+
+    # sid = 36: 激光照射
+    if sid == 36:
+        return {
+            "sid": 36,
+            "time": param.get("time", 120),
+            "act": param.get("act", 1),
+            "param1": param.get("param1", 0),
+            "param2": param.get("param2", 0),
+            "ene": param.get("ene", 80),
+            "freq": param.get("freq", 1000),
+            "meat": param.get("meat", 30),
+            "delay": param.get("delay", 5),
+            "max": param.get("max", 10),
+            "type": param.get("type", 1),
+            "strategy": param.get("strategy", 0),
+            "lon": _to_int_scaled(param.get("lon", 0), 1e6),
+            "lat": _to_int_scaled(param.get("lat", 0), 1e6),
+            "alt": _to_int_scaled(param.get("alt", 0), 10),
+        }
+
+    # sid = 54/55: 强声拒止 / 强光拒止
+    if sid in (54, 55):
+        return {
+            "sid": sid,
+            "time": param.get("time", 60),
+            "tarty": param.get("tarty", 0),
+            "attr": param.get("attr", 0),
+            "thr": param.get("thr", 0),
+            "dam": param.get("dam", 0),
+            "blk": param.get("blk", 0),
+            "figt": param.get("figt", 0),
+            "sug": param.get("sug", 0),
+            "ammo": param.get("ammo", 0),
+            "strategy": param.get("strategy", 0),
+            "area": _build_area_points(param.get("area")),
+        }
+
+    # sid = 41: 电磁侦察
+    if sid == 41:
+        service = {
+            "sid": 41,
+            "mode": param.get("mode", 3),
+            "time": param.get("time", 300),
+            "num": param.get("num", 1),
+            "freqtype": param.get("freqtype", 62),
+            "frequency": param.get("frequency", []),
+            "area": _build_area_points(param.get("area")),
+        }
+        direct = _build_direct(param.get("direct"))
+        if direct and param.get("mode") == 4:
+            service["direct"] = direct
+        return service
+
+    # sid = 42: 电磁突击 / 电磁干扰
+    if sid == 42:
+        service = {
+            "sid": 42,
+            "mode": param.get("mode", 3),
+            "time": param.get("time", 300),
+            "sort": param.get("sort", 1),
+            "num": param.get("num", 1),
+            "freqtype": param.get("freqtype", 62),
+            "frequency": param.get("frequency", []),
+            "area": _build_area_points(param.get("area")),
+            "protect": param.get("protect", {}),
+        }
+        direct = _build_direct(param.get("direct"))
+        if direct and param.get("mode") == 4:
+            service["direct"] = direct
+        return service
+
+    # sid = 48: 载荷静默
+    if sid == 48:
+        return {"sid": 48, "time": param.get("time", 300)}
 
     # 兜底
     return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
@@ -643,6 +878,9 @@ def build_mission_data(
     """
     plan_id = plan.get("plan_id", "")
     title = plan.get("title", "")
+
+    # 建立 vid -> vehicle_type 映射
+    vid_vehicle_type_map = _build_vid_vehicle_type_map(plan)
 
     # 生成 tid
     if tid is None:
@@ -738,8 +976,9 @@ def build_mission_data(
         num = len(actions)
 
         acts = []
+        vehicle_type = vid_vehicle_type_map.get(vid, "")
         for idx, action in enumerate(actions, start=1):
-            service = _build_service_from_action(action)
+            service = _build_service_from_action(action, vehicle_type)
             act = {
                 "aid": idx,
                 "num": num,
