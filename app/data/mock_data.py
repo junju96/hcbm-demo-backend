@@ -466,6 +466,34 @@ def _build_fake_action_sequence_plan():
                }),
     ]
 
+    # ---------- 空地车载荷 ----------
+    air_ground_vid = "equipment:air-ground-01"
+    air_recon_point = {
+        "lon": 116.391000,
+        "lat": 39.907000,
+        "alt": 100.0,
+        "type": 0,
+        "speed": 150,
+        "camera": 2,
+        "gimpitch": 36100,
+        "gimyaw": 36100,
+        "action": 1,
+        "playaw": 36100,
+        "zoom": 10,
+        "loiter": 0,
+    }
+    air_ground_actions = [
+        action("AG_AIR_RECON", "空中侦察", air_ground_vid, 1, "air-recon",
+               "空中平台对指定区域/点实施侦察", {
+                   "type": 2,
+                   "mode": 1,
+                   "time": 120,
+                   "points1": [air_recon_point],
+                   "points2": [],
+                   "points3": [],
+               }),
+    ]
+
     # ---------- 电磁车载荷 ----------
     electronic_vid = "equipment:electronic-01"
     frequency = [{"start": 30000000, "end": 18000000000}]
@@ -529,13 +557,13 @@ def _build_fake_action_sequence_plan():
         "task_type": "PLAN",
         "plan_id": plan_id,
         "title": "行动序列参数调测方案",
-        "description": "包含底盘、火力、侦打、巡逻、电磁五类车型的全部协议元任务（不含整车模式、自定义打击、通信中继车）",
+        "description": "包含底盘、火力、侦打、巡逻、电磁、空地六类车型的全部协议元任务（不含整车模式、自定义打击、通信中继车）",
         "state": "DRAFT",
         "teams": [
             {
                 "team_id": team_id,
                 "name": "综合调测组",
-                "description": "包含底盘、火力、侦打、巡逻、电磁五类车型的调测编组",
+                "description": "包含底盘、火力、侦打、巡逻、电磁、空地六类车型的调测编组",
                 "state": "READY",
                 "vehicles": [
                     {"vid": chassis_vid, "resource_type": "Chassis-UGV"},
@@ -543,6 +571,7 @@ def _build_fake_action_sequence_plan():
                     {"vid": recon_strike_vid, "resource_type": "Recon-Strike-UGV"},
                     {"vid": patrol_vid, "resource_type": "Patrol-UGV"},
                     {"vid": electronic_vid, "resource_type": "Electronic-UGV"},
+                    {"vid": air_ground_vid, "resource_type": "Air-Ground-UAV"},
                 ],
             }
         ],
@@ -559,7 +588,7 @@ def _build_fake_action_sequence_plan():
                 "stage_id": stage_id,
                 "title": "全行动类型调测阶段",
                 "stage_seq": 1,
-                "description": "依次执行所有车型支持的全部协议元任务",
+                "description": "依次执行所有车型支持的全部协议元任务（含空地车空中侦察）",
                 "team_ids": [team_id],
                 "target_ids": ["target:AREA_A"],
                 "state": "SCHEDULED",
@@ -570,6 +599,7 @@ def _build_fake_action_sequence_plan():
                         {"vid": recon_strike_vid, "state": "SCHEDULED", "action_type": "", "actions": recon_strike_actions},
                         {"vid": patrol_vid, "state": "SCHEDULED", "action_type": "", "actions": patrol_actions},
                         {"vid": electronic_vid, "state": "SCHEDULED", "action_type": "", "actions": electronic_actions},
+                        {"vid": air_ground_vid, "state": "SCHEDULED", "action_type": "", "actions": air_ground_actions},
                     ]
                 },
             }

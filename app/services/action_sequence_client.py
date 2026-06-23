@@ -433,6 +433,8 @@ def _resource_type_to_vehicle_type(resource_type: str) -> str:
         "patrol_ugv": "patrol",
         "electronic_ugv": "electronic",
         "communication_ugv": "communication",
+        "air_ground_uav": "air_ground",
+        "air_ground_ugv": "air_ground",
     }
     return mapping.get(rt, "")
 
@@ -507,6 +509,12 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
             "electronic-recon": 41,
             "electronic-jamming": 42,
             "payload-silent": 48,
+        }.get(t)
+
+    # 空地车 (sid 70~79)
+    if vt == "air_ground":
+        return {
+            "air-recon": 71,
         }.get(t)
 
     # fallback：按名称关键词推断
@@ -616,6 +624,29 @@ def _build_strike_points(points):
             "blk": pt.get("blk", 0),
             "figt": pt.get("figt", 0),
             "sug": pt.get("sug", 0),
+        })
+    return result
+
+
+def _build_air_recon_points(points):
+    """空中侦察航路点：lon/lat 缩放 1e6，alt 缩放 10，保留飞行/相机扩展字段"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        result.append({
+            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
+            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
+            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "type": pt.get("type", 0),
+            "speed": int(float(pt.get("speed", 0))),
+            "camera": pt.get("camera", 1),
+            "gimpitch": int(float(pt.get("gimpitch", 36100))),
+            "gimyaw": int(float(pt.get("gimyaw", 36100))),
+            "action": pt.get("action", 1),
+            "playaw": int(float(pt.get("playaw", 36100))),
+            "zoom": int(float(pt.get("zoom", 0))),
+            "loiter": int(float(pt.get("loiter", 0))),
         })
     return result
 
@@ -813,6 +844,18 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "ammo": param.get("ammo", 0),
             "strategy": param.get("strategy", 0),
             "area": _build_area_points(param.get("area")),
+        }
+
+    # sid = 71: 空中侦察
+    if sid == 71:
+        return {
+            "sid": 71,
+            "type": param.get("type", 2),
+            "mode": param.get("mode", 1),
+            "time": param.get("time", 120),
+            "points1": _build_air_recon_points(param.get("points1")),
+            "points2": _build_air_recon_points(param.get("points2")),
+            "points3": _build_air_recon_points(param.get("points3")),
         }
 
     # sid = 41: 电磁侦察
