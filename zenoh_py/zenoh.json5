@@ -1,0 +1,13 @@
+{
+  mode: "client",
+  connect: {
+    endpoints: [
+      "tcp/25.11.1.147:7447"
+    ]
+  },
+  listen: {
+    endpoints: [
+      "tcp/0.0.0.0:0"
+    ]
+  }
+}
