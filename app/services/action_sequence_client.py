@@ -22,11 +22,29 @@ from app.services.task_pool import task_pool
 from app.services import zenoh_client
 
 
+def _infer_resource_type_from_vid(vid: str) -> str:
+    """从 equipment vid 推断 resource_type，用于数据服务器 team_equipments 为空时的兜底。"""
+    if "fire-support" in vid:
+        return "Fire-Support-UGV"
+    if "recon-strike" in vid:
+        return "Recon-Strike-UGV"
+    if "patrol" in vid:
+        return "Patrol-UGV"
+    if "electronic" in vid:
+        return "Electronic-UGV"
+    if "air-ground" in vid:
+        return "Air-Ground-UAV"
+    if "chassis" in vid:
+        return "Chassis-UGV"
+    return ""
+
+
 def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     将 plan.stages[].team_actions 转换为按车辆(vid)组织的行动序列列表。
-    兼容两种数据结构：
-      - 真实服务器: team_actions 为 list[{"team_id": "...", "team_actions": [...]}]
+    兼容三种数据结构：
+      - 数据服务器标准 /simple: team_actions 为 list[{"team_id": "...", "car_actions": [...]}]
+      - 旧真实服务器: team_actions 为 list[{"team_id": "...", "team_actions": [...]}]
       - 旧 Mock 数据: team_actions 为 dict{"team_id": [...]}
     """
     plan_id = plan.get("plan_id", "")
@@ -47,8 +65,13 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         elif isinstance(team_actions, list):
             for ta in team_actions:
                 team_id = ta.get("team_id", "")
-                vehicles = ta.get("team_actions", [])
-                team_vehicle_pairs.append((team_id, vehicles))
+                # 标准 /simple 接口使用 car_actions，旧接口使用 team_actions
+                car_actions = ta.get("car_actions", [])
+                if car_actions:
+                    team_vehicle_pairs.append((team_id, car_actions))
+                else:
+                    vehicles = ta.get("team_actions", [])
+                    team_vehicle_pairs.append((team_id, vehicles))
 
         for team_id, vehicles in team_vehicle_pairs:
             if not isinstance(vehicles, list):
@@ -77,15 +100,49 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     return results
 
 
+def _normalize_plan_field_names(obj: Any) -> Any:
+    """
+    将数据服务器返回的扁平字段名归一化为本地 mock 使用的字段名。
+    例如 plan_title -> title, action_name -> name, team_equipments -> vehicles。
+    """
+    if isinstance(obj, list):
+        return [_normalize_plan_field_names(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+
+    # 字段名映射：数据服务器字段 -> 本地字段
+    key_map = {
+        "plan_title": "title",
+        "plan_description": "description",
+        "stage_title": "title",
+        "stage_description": "description",
+        "team_name": "name",
+        "team_description": "description",
+        "team_equipments": "vehicles",
+        "action_name": "name",
+        "action_description": "description",
+    }
+
+    normalized: Dict[str, Any] = {}
+    for k, v in obj.items():
+        new_key = key_map.get(k, k)
+        normalized[new_key] = _normalize_plan_field_names(v)
+    return normalized
+
+
 def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 调用数据服务器 GET /by_type/PLAN（静默模式，不打印日志）。
+    """查询行动方案列表 — 调用数据服务器 POST /resources/query（静默模式，不打印日志）。
     数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测数据始终合并到列表中。"""
-    data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
+    data = _http_post(
+        "/api/v1/task_pool/resources/query",
+        {"task_type": "PLAN", "limit": limit},
+        silent=True,
+    )
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
     elif data is not None and isinstance(data, dict):
-        # 有些接口返回 { items: [...] }
+        # /retrieval/query 返回 { items: [...] }
         items = (data.get("items") or data.get("data") or [])[:limit]
 
     # 合并本地 task_pool 中的 PLAN（主要是 fake 调测方案），确保调试数据始终可见且排在最前
@@ -105,6 +162,7 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
 
     result = []
     for idx, item in enumerate(items):
+        item = _normalize_plan_field_names(item)
         raw = item.get("raw_payload", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
@@ -143,10 +201,10 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    data = _http_get(f"/api/v1/task_pool/resources/{rid}", silent=True)
+    data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
     if data is not None and isinstance(data, dict):
-        # 数据服务端返回的原始数据本身即包含业务字段，无需再提取 raw_payload
-        plan = data
+        # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
+        plan = _normalize_plan_field_names(data)
         # 同步缓存到本地 task_pool，方便后续 PATCH 更新
         task_pool.set(rid, plan)
     else:
@@ -193,7 +251,7 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         if vid not in vehicle_map:
             vehicle_map[vid] = {
                 "vid": vid,
-                "resource_type": team_type_map.get(vid, ""),
+                "resource_type": team_type_map.get(vid) or _infer_resource_type_from_vid(vid),
                 "total_actions": 0,
                 "current_state": "READY",
                 "stages": [],
@@ -276,9 +334,9 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
     # 2. 确保本地 task_pool 中有该 plan 的缓存
     plan = task_pool.get(rid)
     if plan is None:
-        data = _http_get(f"/api/v1/task_pool/resources/{rid}", silent=True)
+        data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
         if data is not None and isinstance(data, dict):
-            plan = data
+            plan = _normalize_plan_field_names(data)
             task_pool.set(rid, plan)
 
     if plan is None:
@@ -1197,9 +1255,13 @@ def publish_control_mission(
 
 
 def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
-    """向操控席数据服务器查询行动方案列表 — GET /by_type/PLAN（静默模式）。
+    """向操控席数据服务器查询行动方案列表 — POST /resources/query（静默模式）。
     服务端不可达或为空时回退本地 task_pool；本地 fake 调测数据始终合并。"""
-    data = _http_get_operator("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
+    data = _http_post_operator(
+        "/api/v1/task_pool/resources/query",
+        {"task_type": "PLAN", "limit": limit},
+        silent=True,
+    )
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
@@ -1228,6 +1290,7 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
 
     result = []
     for item in items:
+        item = _normalize_plan_field_names(item)
         raw = item.get("raw_payload", {}) or {}
         if not isinstance(raw, dict):
             raw = {}
@@ -1258,9 +1321,9 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     """向操控席数据服务器获取方案详情（静默模式）；不可达时回退本地 task_pool。"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
-    data = _http_get_operator(f"/api/v1/task_pool/resources/{rid}", silent=True)
+    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
     if data is not None and isinstance(data, dict):
-        plan = data
+        plan = _normalize_plan_field_names(data)
         task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
