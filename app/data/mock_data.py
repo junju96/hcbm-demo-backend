@@ -170,7 +170,7 @@ def _build_fake_action_sequence_plan():
       - param 字段与协议 service 字段对齐，便于直接下发转换。
     """
 
-    plan_id = "FAKE_ACTION_SEQUENCE_001"
+    plan_id = "FAKE_ACTION_SEQUENCE_LOCAL_001"
     stage_id = "STAGE_FAKE_001"
     team_id = "TEAM_ALL"
 
@@ -248,14 +248,20 @@ def _build_fake_action_sequence_plan():
                    "safe_mode": 0,
                    "strategy": 0,
                }),
-        action("CH_SILENT", "静默值守", chassis_vid, 3, "silent-guard",
-               "在指定位置静默值守", {
-                   "time": 300,
-               }),
+        {
+            **action("CH_SILENT", "静默值守", chassis_vid, 3, "silent-guard",
+                   "在指定位置静默值守", {
+                       "time": 300,
+                   }),
+            "dependencies": ["1", "2"],
+        },
         action("CH_SET_RETURN", "设置返航点", chassis_vid, 4, "set-return-point",
                "设置当前位置为返航点", {}),
-        action("CH_RETURN", "开启返航", chassis_vid, 5, "return-to-base",
-               "返回已设置的返航点", {}),
+        {
+            **action("CH_RETURN", "开启返航", chassis_vid, 5, "return-to-base",
+                   "返回已设置的返航点", {}),
+            "dependencies": ["4", "3"],
+        },
         action("CH_FORMATION", "编队机动", chassis_vid, 6, "formation-move",
                "按编队队形跟随头车机动", {
                    "points": formation_points,
@@ -556,7 +562,7 @@ def _build_fake_action_sequence_plan():
         "resource_id": f"plan:{plan_id}",
         "task_type": "PLAN",
         "plan_id": plan_id,
-        "title": "行动序列参数调测方案",
+        "title": "行动序列参数调测方案-本地假数据",
         "description": "包含底盘、火力、侦打、巡逻、电磁、空地六类车型的全部协议元任务（不含整车模式、自定义打击、通信中继车）",
         "state": "DRAFT",
         "teams": [

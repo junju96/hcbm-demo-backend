@@ -163,33 +163,27 @@ def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
     result = []
     for idx, item in enumerate(items):
         item = _normalize_plan_field_names(item)
-        raw = item.get("raw_payload", {}) or {}
-        if not isinstance(raw, dict):
-            raw = {}
-        # 统一优先从顶层取，顶层没有再 fallback 到 raw_payload
-        tactic = item.get("tactic") or raw.get("tactic") or {}
+        tactic = item.get("tactic") or {}
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
             item.get("title")
-            or raw.get("title")
             or tactic.get("title")
             or item.get("plan_id")
-            or raw.get("plan_id", "")
+            or ""
         )
-        state = item.get("state") or raw.get("state") or "DRAFT"
-        stages_top = item.get("stages")
-        stages_raw = raw.get("stages", [])
+        state = item.get("state") or "DRAFT"
+        stages = item.get("stages") or []
         if idx == 0:
-            print(f"[AS-DEBUG] query_plans first item: resource_id={item.get('resource_id')}, stages_top={len(stages_top) if isinstance(stages_top, list) else 'N/A'}, stages_raw={len(stages_raw)}, final_stages_count={len(stages_top or stages_raw)}")
+            print(f"[AS-DEBUG] query_plans first item: resource_id={item.get('resource_id')}, stages_count={len(stages) if isinstance(stages, list) else 'N/A'}")
         result.append({
-            "plan_id": item.get("plan_id") or raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
-            "description": item.get("description") or raw.get("description") or "",
+            "description": item.get("description") or "",
             "state": state,
-            "teams_count": len(item.get("teams") or raw.get("teams", [])),
-            "stages_count": len(stages_top or stages_raw),
+            "teams_count": len(item.get("teams") or []),
+            "stages_count": len(stages),
         })
     return result
 
@@ -205,6 +199,30 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     if data is not None and isinstance(data, dict):
         # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
         plan = _normalize_plan_field_names(data)
+
+        # 如果数据服务端返回的 plan 没有有效 actions，fallback 到本地 task_pool 的完整假数据
+        def _has_actions(p):
+            for stage in p.get("stages", []):
+                team_actions = stage.get("team_actions", {})
+                vehicles_list = []
+                if isinstance(team_actions, dict):
+                    for vlist in team_actions.values():
+                        if isinstance(vlist, list):
+                            vehicles_list.extend(vlist)
+                elif isinstance(team_actions, list):
+                    for ta in team_actions:
+                        vehicles_list.extend(ta.get("car_actions", []) or ta.get("team_actions", []) or [])
+                for v in vehicles_list:
+                    if v.get("actions"):
+                        return True
+            return False
+
+        if not _has_actions(plan):
+            local_plan = task_pool.get(rid)
+            if local_plan:
+                print(f"[AS-DEBUG] get_plan_detail use local task_pool because data_server actions empty, plan_id={plan_id}")
+                plan = local_plan
+
         # 同步缓存到本地 task_pool，方便后续 PATCH 更新
         task_pool.set(rid, plan)
     else:
@@ -1291,29 +1309,24 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
     result = []
     for item in items:
         item = _normalize_plan_field_names(item)
-        raw = item.get("raw_payload", {}) or {}
-        if not isinstance(raw, dict):
-            raw = {}
-        # 统一优先从顶层取，顶层没有再 fallback 到 raw_payload
-        tactic = item.get("tactic") or raw.get("tactic") or {}
+        tactic = item.get("tactic") or {}
         if not isinstance(tactic, dict):
             tactic = {}
         title = (
             item.get("title")
-            or raw.get("title")
             or tactic.get("title")
             or item.get("plan_id")
-            or raw.get("plan_id", "")
+            or ""
         )
-        state = item.get("state") or raw.get("state") or "DRAFT"
+        state = item.get("state") or "DRAFT"
         result.append({
-            "plan_id": item.get("plan_id") or raw.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
-            "description": item.get("description") or raw.get("description") or "",
+            "description": item.get("description") or "",
             "state": state,
-            "teams_count": len(item.get("teams") or raw.get("teams", [])),
-            "stages_count": len(item.get("stages") or raw.get("stages", [])),
+            "teams_count": len(item.get("teams") or []),
+            "stages_count": len(item.get("stages") or []),
         })
     return result
 
@@ -1324,6 +1337,30 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
     if data is not None and isinstance(data, dict):
         plan = _normalize_plan_field_names(data)
+
+        # 如果数据服务端返回的 plan 没有有效 actions，fallback 到本地 task_pool 的完整假数据
+        def _has_actions(p):
+            for stage in p.get("stages", []):
+                team_actions = stage.get("team_actions", {})
+                vehicles_list = []
+                if isinstance(team_actions, dict):
+                    for vlist in team_actions.values():
+                        if isinstance(vlist, list):
+                            vehicles_list.extend(vlist)
+                elif isinstance(team_actions, list):
+                    for ta in team_actions:
+                        vehicles_list.extend(ta.get("car_actions", []) or ta.get("team_actions", []) or [])
+                for v in vehicles_list:
+                    if v.get("actions"):
+                        return True
+            return False
+
+        if not _has_actions(plan):
+            local_plan = task_pool.get(rid)
+            if local_plan:
+                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because data_server actions empty, plan_id={plan_id}")
+                plan = local_plan
+
         task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
