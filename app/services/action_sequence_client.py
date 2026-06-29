@@ -516,8 +516,9 @@ def _resource_type_to_vehicle_type(resource_type: str) -> str:
 
 
 def _build_vid_vehicle_type_map(plan: Dict[str, Any]) -> Dict[str, str]:
-    """从 plan.teams 建立 vid -> vehicle_type 映射"""
+    """建立 vid -> vehicle_type 映射；优先 plan.teams，其次 vehicle_summary，最后按 vid 推断"""
     result: Dict[str, str] = {}
+    # 1) 从 plan.teams 读取 resource_type
     for team in plan.get("teams", []) or []:
         if not isinstance(team, dict):
             continue
@@ -526,6 +527,22 @@ def _build_vid_vehicle_type_map(plan: Dict[str, Any]) -> Dict[str, str]:
                 result[v["vid"]] = _resource_type_to_vehicle_type(v.get("resource_type", ""))
         if team.get("vid"):
             result[team["vid"]] = _resource_type_to_vehicle_type(team.get("resource_type", ""))
+
+    # 2) 从 vehicle_summary 兜底（数据服务器可能只在 vehicle_summary 中带 resource_type）
+    for vsum in plan.get("vehicle_summary", []) or []:
+        vid = vsum.get("vid", "")
+        if not vid:
+            continue
+        rt = vsum.get("resource_type", "")
+        if rt:
+            result[vid] = _resource_type_to_vehicle_type(rt)
+        elif vid not in result:
+            result[vid] = _resource_type_to_vehicle_type(_infer_resource_type_from_vid(vid))
+
+    # 3) 仍有缺失则按 vid 推断
+    for vid in result:
+        if not result[vid]:
+            result[vid] = _resource_type_to_vehicle_type(_infer_resource_type_from_vid(vid))
     return result
 
 
@@ -591,6 +608,8 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "air_ground":
         return {
             "air-recon": 71,
+            "air_recon": 71,
+            "ag_air_recon": 71,
         }.get(t)
 
     # fallback：按名称关键词推断
@@ -642,6 +661,8 @@ def _action_name_to_sid(name: str) -> int:
         return 22
     if "光电" in n or "白光" in n or "红外" in n:
         return 21
+    if "空中侦察" in n or "空中" in n:
+        return 71
     # 默认：自主机动
     return 1
 
