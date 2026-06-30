@@ -288,6 +288,19 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     return ApiResponse(data=saved)
 
 
+@router.post("/action-sequences/operator/plans/{plan_id}/sync", response_model=ApiResponse)
+async def sync_plan_operator(plan_id: str):
+    """操控端 — 把本地 task_pool 中的 plan 同步到数据服务器"""
+    ok = sync_plan_to_operator(plan_id)
+    if not ok:
+        return ApiResponse(code=500, message="同步到数据服务器失败", data=None)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "sync_to_operator",
+        "message": "方案已同步到数据服务器",
+    })
+
+
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
 async def start_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
     """操控端 — 开始执行 — Zenoh control_mission (task_control=1)"""
