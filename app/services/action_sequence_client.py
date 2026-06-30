@@ -547,11 +547,15 @@ def _build_vid_vehicle_type_map(plan: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
-    """根据车型 + action_type 解析协议 sid；无法解析时 fallback 到名称关键词推断"""
+    """根据车型 + action_type 解析协议 sid；无法解析时 fallback 到名称关键词推断
+
+    action_type 统一按小写处理，兼容旧版连字符命名与新版首字母大写命名。
+    命名来源：docs/00-行动序列参考文档/装备行动序列数据结构 - 大模型侧定义-from昕鸣.md
+    """
     t = (action_type or "").strip().lower()
     vt = (vehicle_type or "").strip().lower()
 
-    # 底盘类（所有车型通用）
+    # 底盘类 / 通用元任务（所有车型通用）
     chassis_map = {
         "auto-move": 1,
         "follow-move": 2,
@@ -569,9 +573,11 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "fire_support":
         return {
             "lens-recon": 21,
+            "search-and-shoot": 22,
             "recon-strike": 22,
             "rocket-launch": 23,
             "loitering-munition-launch": 24,
+            "7.62mm-gun-shot": 25,
             "gun-shot": 25,
         }.get(t)
 
@@ -579,9 +585,11 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "recon_strike":
         return {
             "lens-recon": 31,
+            "search-and-shoot": 32,
             "recon-strike": 32,
             "40mm-gun-launch": 33,
             "at-missile-launch": 34,
+            "7.62mm-gun-shot": 35,
             "gun-shot": 35,
             "laser-illumination": 36,
         }.get(t)
@@ -590,16 +598,29 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "patrol":
         return {
             "lens-recon": 51,
+            "search-and-shoot": 52,
             "recon-strike": 52,
+            "7.62mm-gun-shot": 53,
             "gun-shot": 53,
+            "sound-expel": 54,
             "acoustic-deterrence": 54,
+            "light-expel": 55,
             "light-deterrence": 55,
+        }.get(t)
+
+    # 通信车 (sid 60~61)
+    if vt == "communication":
+        return {
+            "land-communication-relay": 60,
+            "air-communication-relay": 61,
         }.get(t)
 
     # 电磁车 (sid 40~48，不含整车模式)
     if vt == "electronic":
         return {
+            "em-recon": 41,
             "electronic-recon": 41,
+            "em-interference": 42,
             "electronic-jamming": 42,
             "payload-silent": 48,
         }.get(t)
@@ -641,11 +662,11 @@ def _action_name_to_sid(name: str) -> int:
         return 34
     if "激光" in n or "照射" in n:
         return 36
-    if "强声" in n:
+    if "强声" in n or "声波" in n or "声音" in n:
         return 54
-    if "强光" in n:
+    if "强光" in n or "灯光" in n:
         return 55
-    if "电磁侦察" in n or "电侦" in n:
+    if "电磁侦察" in n or "电侦" in n or "频谱" in n:
         return 41
     if "电磁" in n or "干扰" in n or "突击" in n:
         return 42
@@ -655,14 +676,16 @@ def _action_name_to_sid(name: str) -> int:
         return 23
     if "巡飞" in n:
         return 24
-    if "机枪" in n or "枪" in n:
+    if "7.62" in n or "机枪" in n or "枪" in n:
         return 25
     if "侦察打击" in n or "搜索打击" in n:
         return 22
-    if "光电" in n or "白光" in n or "红外" in n:
+    if "光电" in n or "白光" in n or "红外" in n or "鹰眼" in n:
         return 21
     if "空中侦察" in n or "空中" in n:
         return 71
+    if "通信中继" in n or "中继" in n:
+        return 61
     # 默认：自主机动
     return 1
 

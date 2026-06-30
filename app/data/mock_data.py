@@ -229,7 +229,7 @@ def _build_fake_action_sequence_plan():
         {"lon": 116.1286534, "lat": 39.7662105, "alt": 53.20, "offsetX": 5, "offsetY": -3},
     ]
     chassis_actions = [
-        action("CH_MOVE", "自主机动", chassis_vid, 1, "auto-move",
+        action("CH_MOVE", "自主机动", chassis_vid, 1, "Auto-Move",
                "沿指定目标点或路径进行自主机动", {
                    "route_id": "route:route-001",
                    "points": path_points,
@@ -237,7 +237,7 @@ def _build_fake_action_sequence_plan():
                    "safe_mode": 0,
                    "loop_mode": 0,
                }),
-        action("CH_FOLLOW", "跟随机动", chassis_vid, 2, "follow-move",
+        action("CH_FOLLOW", "跟随机动", chassis_vid, 2, "Follow-Move",
                "跟随目标进行机动", {
                    "x": 960,
                    "y": 540,
@@ -249,31 +249,31 @@ def _build_fake_action_sequence_plan():
                    "strategy": 0,
                }),
         {
-            **action("CH_SILENT", "静默值守", chassis_vid, 3, "silent-guard",
+            **action("CH_SILENT", "静默值守", chassis_vid, 3, "Silent-Guard",
                    "在指定位置静默值守", {
                        "time": 300,
                    }),
             "dependencies": ["1", "2"],
         },
-        action("CH_SET_RETURN", "设置返航点", chassis_vid, 4, "set-return-point",
+        action("CH_SET_RETURN", "设置返航点", chassis_vid, 4, "Set-Return-Point",
                "设置当前位置为返航点", {}),
         {
-            **action("CH_RETURN", "开启返航", chassis_vid, 5, "return-to-base",
+            **action("CH_RETURN", "开启返航", chassis_vid, 5, "Return-To-Base",
                    "返回已设置的返航点", {}),
             "dependencies": ["4", "3"],
         },
-        action("CH_FORMATION", "编队机动", chassis_vid, 6, "formation-move",
+        action("CH_FORMATION", "编队机动", chassis_vid, 6, "Formation-Move",
                "按编队队形跟随头车机动", {
                    "points": formation_points,
                    "limited_speed": 18,
                    "formation_mode": 0,
                    "safe_mode": 0,
                }),
-        action("CH_MANUAL", "人工任务", chassis_vid, 7, "manual-task",
+        action("CH_MANUAL", "人工任务", chassis_vid, 7, "Manual-Task",
                "人工介入任务", {
                    "type": 1,
                }),
-        action("CH_POSE", "姿态调整", chassis_vid, 8, "pose-adjust",
+        action("CH_POSE", "姿态调整", chassis_vid, 8, "Pose-Adjust",
                "调整车辆姿态", {
                    "pose": [9000, 0, 0],
                    "pose_deviation": [36100, 9100, 9100],
@@ -285,7 +285,7 @@ def _build_fake_action_sequence_plan():
     # ---------- 火力车载荷 ----------
     fire_support_vid = "equipment:fire-support-01"
     fire_support_actions = [
-        action("FS_LENS", "光电侦察", fire_support_vid, 1, "lens-recon",
+        action("FS_LENS", "光电侦察", fire_support_vid, 1, "Lens-Recon",
                "使用白光/红外侦察传感器对目标区域进行侦察", {
                    "type": 2,
                    "mode": 3,
@@ -302,20 +302,20 @@ def _build_fake_action_sequence_plan():
                        "sens": 0,
                    },
                }),
-        action("FS_RECON_STRIKE", "侦察打击", fire_support_vid, 2, "recon-strike",
+        action("FS_RECON_STRIKE", "侦察打击", fire_support_vid, 2, "Search-And-Shoot",
                "区域自主侦察，发现目标后立即自主打击", {
                    "time": 180,
                    "area_id": "area:area-001",
                    "area": area_a[:2],
                }),
-        action("FS_GUN", "机枪打击", fire_support_vid, 3, "gun-shot",
+        action("FS_GUN", "机枪打击", fire_support_vid, 3, "7.62mm-Gun-Shot",
                "使用机枪对目标点进行打击", {
                    "time": 30,
                    "sort": 1,
                    "num": 1,
                    "points": [target_point],
                }),
-        action("FS_ROCKET", "火箭弹打击", fire_support_vid, 4, "rocket-launch",
+        action("FS_ROCKET", "火箭弹打击", fire_support_vid, 4, "Rocket-Launch",
                "使用火箭弹对目标点/区域进行打击", {
                    "type": 1,
                    "time": 60,
@@ -323,7 +323,7 @@ def _build_fake_action_sequence_plan():
                    "num": 1,
                    "points": [target_point],
                }),
-        action("FS_LOITER", "巡飞弹打击", fire_support_vid, 5, "loitering-munition-launch",
+        action("FS_LOITER", "巡飞弹打击", fire_support_vid, 5, "Loitering-Munition-Launch",
                "发射巡飞弹对目标点进行打击", {
                    "time": 60,
                    "sort": 1,
@@ -335,7 +335,7 @@ def _build_fake_action_sequence_plan():
     # ---------- 侦打车载荷 ----------
     recon_strike_vid = "equipment:recon-strike-01"
     recon_strike_actions = [
-        action("RS_LENS", "光电侦察", recon_strike_vid, 1, "lens-recon",
+        action("RS_LENS", "光电侦察", recon_strike_vid, 1, "Lens-Recon",
                "使用白光/红外侦察传感器对目标区域进行侦察", {
                    "type": 2,
                    "mode": 3,
@@ -352,34 +352,34 @@ def _build_fake_action_sequence_plan():
                        "sens": 0,
                    },
                }),
-        action("RS_RECON_STRIKE", "侦察打击", recon_strike_vid, 2, "recon-strike",
+        action("RS_RECON_STRIKE", "侦察打击", recon_strike_vid, 2, "Search-And-Shoot",
                "区域自主侦察，发现目标后立即自主打击", {
                    "time": 180,
                    "area_id": "area:area-001",
                    "area": area_a[:2],
                }),
-        action("RS_40MM", "40炮打击", recon_strike_vid, 3, "40mm-gun-launch",
+        action("RS_40MM", "40炮打击", recon_strike_vid, 3, "40mm-Gun-Launch",
                "使用40炮对目标点进行打击", {
                    "time": 45,
                    "sort": 1,
                    "num": 1,
                    "points": [target_point],
                }),
-        action("RS_AT", "红箭13导弹打击", recon_strike_vid, 4, "at-missile-launch",
+        action("RS_AT", "红箭13导弹打击", recon_strike_vid, 4, "AT-Missile-Launch",
                "使用红箭13反坦克导弹对目标点进行打击", {
                    "time": 60,
                    "sort": 1,
                    "num": 1,
                    "points": [{**target_point, "alt": 2100}],
                }),
-        action("RS_GUN", "机枪打击", recon_strike_vid, 5, "gun-shot",
+        action("RS_GUN", "机枪打击", recon_strike_vid, 5, "7.62mm-Gun-Shot",
                "使用机枪对目标点进行打击", {
                    "time": 30,
                    "sort": 1,
                    "num": 1,
                    "points": [target_point],
                }),
-        action("RS_LASER", "激光照射", recon_strike_vid, 6, "laser-illumination",
+        action("RS_LASER", "激光照射", recon_strike_vid, 6, "Laser-Illumination",
                "对目标点进行激光照射引导", {
                    "time": 120,
                    "act": 1,
@@ -401,7 +401,7 @@ def _build_fake_action_sequence_plan():
     # ---------- 巡逻车载荷 ----------
     patrol_vid = "equipment:patrol-01"
     patrol_actions = [
-        action("PT_LENS", "光电侦察", patrol_vid, 1, "lens-recon",
+        action("PT_LENS", "光电侦察", patrol_vid, 1, "Lens-Recon",
                "使用白光/红外侦察传感器对目标区域进行侦察", {
                    "type": 2,
                    "mode": 3,
@@ -418,7 +418,7 @@ def _build_fake_action_sequence_plan():
                        "sens": 0,
                    },
                }),
-        action("PT_RECON_STRIKE", "巡逻车侦察打击", patrol_vid, 2, "recon-strike",
+        action("PT_RECON_STRIKE", "巡逻车侦察打击", patrol_vid, 2, "Search-And-Shoot",
                "区域巡逻侦察并打击发现目标", {
                    "time": 180,
                    "tarty": 6,
@@ -433,14 +433,14 @@ def _build_fake_action_sequence_plan():
                    "area_id": "area:area-001",
                    "area": area_a[:2],
                }),
-        action("PT_GUN", "机枪打击", patrol_vid, 3, "gun-shot",
+        action("PT_GUN", "机枪打击", patrol_vid, 3, "7.62mm-Gun-Shot",
                "使用机枪对目标点进行打击", {
                    "time": 30,
                    "sort": 1,
                    "num": 1,
                    "points": [target_point],
                }),
-        action("PT_ACOUSTIC", "强声拒止", patrol_vid, 4, "acoustic-deterrence",
+        action("PT_ACOUSTIC", "强声拒止", patrol_vid, 4, "Sound-Expel",
                "对目标区域实施强声拒止", {
                    "time": 60,
                    "tarty": 1,
@@ -455,7 +455,7 @@ def _build_fake_action_sequence_plan():
                    "area_id": "area:area-001",
                    "area": area_a[:1],
                }),
-        action("PT_LIGHT", "强光拒止", patrol_vid, 5, "light-deterrence",
+        action("PT_LIGHT", "强光拒止", patrol_vid, 5, "Light-Expel",
                "对目标区域实施强光拒止", {
                    "time": 60,
                    "tarty": 1,
@@ -489,7 +489,7 @@ def _build_fake_action_sequence_plan():
         "loiter": 0,
     }
     air_ground_actions = [
-        action("AG_AIR_RECON", "空中侦察", air_ground_vid, 1, "air-recon",
+        action("AG_AIR_RECON", "空中侦察", air_ground_vid, 1, "Air-Recon",
                "空中平台对指定区域/点实施侦察", {
                    "type": 2,
                    "mode": 1,
@@ -512,7 +512,7 @@ def _build_fake_action_sequence_plan():
         "xtl_dp": "800.0,900.0",
     }
     electronic_actions = [
-        action("EL_RECON", "电磁侦察", electronic_vid, 1, "electronic-recon",
+        action("EL_RECON", "电磁侦察", electronic_vid, 1, "EM-Recon",
                "对目标区域实施电磁频谱侦察", {
                    "mode": 3,
                    "time": 300,
@@ -531,7 +531,7 @@ def _build_fake_action_sequence_plan():
                        "sens": 0,
                    },
                }),
-        action("EL_JAM", "电磁突击", electronic_vid, 2, "electronic-jamming",
+        action("EL_JAM", "电磁干扰", electronic_vid, 2, "EM-Interference",
                "对目标区域实施电磁干扰压制", {
                    "mode": 3,
                    "time": 300,
