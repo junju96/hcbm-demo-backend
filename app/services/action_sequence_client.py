@@ -17,7 +17,7 @@ import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
-from app.services.data_server_client import _http_get, _http_post, _http_patch, _http_get_operator, _http_post_operator
+from app.services.data_server_client import _http_get, _http_post, _http_patch, _http_get_operator, _http_post_operator, _http_patch_operator
 from app.services.task_pool import task_pool
 from app.services import zenoh_client
 
@@ -1489,7 +1489,7 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
 
 
 def sync_plan_to_operator(plan_id: str) -> bool:
-    """把本地 task_pool 中的 plan 同步到操控席数据服务器； plan 不存在则返回 False"""
+    """把本地 task_pool 中的 plan 通过 PATCH /resources/{rid} 同步到操控席数据服务器。"""
     from app.services.task_pool import task_pool
 
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
@@ -1497,8 +1497,18 @@ def sync_plan_to_operator(plan_id: str) -> bool:
     if not plan:
         return False
     try:
-        import_plan_to_operator(plan)
-        return True
+        result = _http_patch_operator(
+            f"/api/v1/task_pool/resources/{rid}",
+            {
+                "title": plan.get("title", ""),
+                "description": plan.get("description", ""),
+                "state": plan.get("state") or "DRAFT",
+                "search_text": plan.get("search_text", ""),
+                "payload": plan,
+            },
+            silent=True,
+        )
+        return result is not None
     except Exception as e:
         print(f"[SYNC-PLAN] sync to operator failed: {e}")
         return False

@@ -275,3 +275,23 @@ def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: boo
         if not silent:
             print(f"[OP-DS-ERR] POST {url} | error={e}")
         return None
+
+
+def _http_patch_operator(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+    """向操控席数据服务器发送 PATCH 请求"""
+    if not HAS_REQUESTS:
+        return None
+    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    try:
+        if not silent:
+            print(f"[OP-DS-OUT] PATCH {url} | body={body_summary}")
+        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        if not silent:
+            print(f"[OP-DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        if not silent:
+            print(f"[OP-DS-ERR] PATCH {url} | error={e}")
+        return None
