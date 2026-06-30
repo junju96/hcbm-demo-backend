@@ -1429,4 +1429,34 @@ def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return result
 
 
+def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """在本地 task_pool 创建/保存一个新的 PLAN 资源；操控席数据服务器不可达时作为兜底"""
+    from app.services.task_pool import task_pool
+
+    plan_id = plan.get("plan_id") or plan.get("resource_id", "").replace("plan:", "")
+    if not plan_id:
+        plan_id = f"PLAN_{uuid.uuid4().hex[:16].upper()}"
+        plan["plan_id"] = plan_id
+
+    rid = plan.get("resource_id") or f"plan:{plan_id}"
+    plan["resource_id"] = rid
+    plan["task_type"] = "PLAN"
+
+    now = datetime.now(timezone.utc).isoformat()
+    plan.setdefault("created_at", now)
+    plan.setdefault("updated_at", now)
+    plan.setdefault("search_text", f"{plan.get('title', '')} {plan.get('description', '')}")
+    if "lifecycle" not in plan:
+        plan["lifecycle"] = {"state": "DRAFT", "created_at": now, "updated_at": now}
+
+    # 尝试导入数据服务器；失败或不可达则仅保存本地
+    try:
+        import_plan_to_operator(plan)
+    except Exception:
+        pass
+
+    task_pool.set(rid, plan)
+    return task_pool.get(rid)
+
+
 

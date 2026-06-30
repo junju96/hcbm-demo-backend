@@ -32,6 +32,7 @@ from app.services.action_sequence_client import (
     query_plans_operator,
     get_plan_detail_operator,
     import_plan_to_operator,
+    create_operator_plan,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
@@ -257,6 +258,19 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
         "vehicle_vid": vehicle_vid_clean,
         "mission_tid": payload["args"]["mission_data"]["task"]["tid"],
         "message": "任务已通过 Zenoh 下发",
+    })
+
+
+@router.post("/action-sequences/operator/plans", response_model=ApiResponse)
+async def create_plan_operator(plan: Dict[str, Any]):
+    """操控端 — 新建行动序列方案并保存到本地 task_pool（同时尝试导入操控席数据服务器）"""
+    saved = create_operator_plan(plan)
+    return ApiResponse(data={
+        "plan_id": saved.get("plan_id"),
+        "resource_id": saved.get("resource_id"),
+        "title": saved.get("title"),
+        "state": saved.get("state"),
+        "message": "方案已保存",
     })
 
 
