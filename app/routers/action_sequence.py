@@ -285,13 +285,7 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     saved = update_operator_plan_locally(plan_id, body)
     if not saved:
         return ApiResponse(code=404, message="Plan not found", data=None)
-    return ApiResponse(data={
-        "plan_id": saved.get("plan_id"),
-        "resource_id": saved.get("resource_id"),
-        "title": saved.get("title"),
-        "state": saved.get("state"),
-        "message": "方案已本地保存",
-    })
+    return ApiResponse(data=saved)
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
