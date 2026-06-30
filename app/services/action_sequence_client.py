@@ -1459,4 +1459,40 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return task_pool.get(rid)
 
 
+def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """仅更新本地 task_pool 中的 PLAN 资源，不同步到数据服务器"""
+    from app.services.task_pool import task_pool
+
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    existing = task_pool.get(rid)
+    if not existing:
+        return None
+
+    # 仅允许更新白名单字段；stages/teams/targets 可整段替换
+    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text"}
+    for key, value in payload.items():
+        if key in allowed_top_keys:
+            existing[key] = copy.deepcopy(value)
+
+    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    task_pool.set(rid, existing)
+    return task_pool.get(rid)
+
+
+def sync_plan_to_operator(plan_id: str) -> bool:
+    """把本地 task_pool 中的 plan 同步到操控席数据服务器； plan 不存在则返回 False"""
+    from app.services.task_pool import task_pool
+
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    plan = task_pool.get(rid)
+    if not plan:
+        return False
+    try:
+        import_plan_to_operator(plan)
+        return True
+    except Exception as e:
+        print(f"[SYNC-PLAN] sync to operator failed: {e}")
+        return False
+
+
 

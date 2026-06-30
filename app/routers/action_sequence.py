@@ -33,6 +33,8 @@ from app.services.action_sequence_client import (
     get_plan_detail_operator,
     import_plan_to_operator,
     create_operator_plan,
+    update_operator_plan_locally,
+    sync_plan_to_operator,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
@@ -226,6 +228,9 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
     if not plan:
         return ApiResponse(code=404, message="Plan not found", data=None)
 
+    # 下发前先把本地 plan 同步到数据服务器
+    sync_plan_to_operator(plan_id)
+
     vehicle_vid = body.vehicle_vid or get_first_vid(plan)
     # 去掉 equipment: 前缀（如 equipment:XL01 → XL01）
     vehicle_vid_clean = vehicle_vid.replace("equipment:", "") if vehicle_vid else vehicle_vid
@@ -271,6 +276,21 @@ async def create_plan_operator(plan: Dict[str, Any]):
         "title": saved.get("title"),
         "state": saved.get("state"),
         "message": "方案已保存",
+    })
+
+
+@router.patch("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
+async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
+    """操控端 — 仅更新本地 task_pool 中的方案，不同步到数据服务器"""
+    saved = update_operator_plan_locally(plan_id, body)
+    if not saved:
+        return ApiResponse(code=404, message="Plan not found", data=None)
+    return ApiResponse(data={
+        "plan_id": saved.get("plan_id"),
+        "resource_id": saved.get("resource_id"),
+        "title": saved.get("title"),
+        "state": saved.get("state"),
+        "message": "方案已本地保存",
     })
 
 
