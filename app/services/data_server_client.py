@@ -19,7 +19,7 @@ except ImportError:
 
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
 OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"  # 操控席数据服务端（后续可独立配置）
-TIMEOUT_SECONDS = 5
+TIMEOUT_SECONDS = (1, 2)  # (connect timeout, read timeout)；连接 1s、读取 2s，断连时快速失败
 MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
 
 # 数据服务器接受的资源 state 合法值（PLAN / KILL_CHAIN 等通用）
