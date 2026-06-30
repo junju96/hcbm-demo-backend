@@ -1376,13 +1376,18 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
 
 
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
-    """向操控席数据服务器获取方案详情（静默模式）；不可达时回退本地 task_pool。"""
+    """向操控席数据服务器获取方案详情（静默模式）；不可达时回退本地 task_pool。
+    注意：操控席本地编辑后的 plan 优先于数据服务器缓存，避免 PATCH 后被旧数据覆盖。"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+
+    # 1) 优先检查本地 task_pool 是否已有该 plan（操控席本地编辑过）
+    local_plan = task_pool.get(rid)
+
     data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
     if data is not None and isinstance(data, dict):
-        plan = _normalize_plan_field_names(data)
+        remote_plan = _normalize_plan_field_names(data)
 
-        # 如果数据服务端返回的 plan 没有有效 actions，fallback 到本地 task_pool 的完整假数据
+        # 如果数据服务端返回的 plan 没有有效 actions，且本地有编辑过的 plan，则使用本地 plan
         def _has_actions(p):
             for stage in p.get("stages", []):
                 team_actions = stage.get("team_actions", {})
@@ -1399,16 +1404,20 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                         return True
             return False
 
-        if not _has_actions(plan):
-            local_plan = task_pool.get(rid)
-            if local_plan:
-                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because data_server actions empty, plan_id={plan_id}")
-                plan = local_plan
-
-        task_pool.set(rid, plan)
+        if not _has_actions(remote_plan) and local_plan:
+            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because data_server actions empty, plan_id={plan_id}")
+            plan = local_plan
+        elif local_plan and local_plan.get("updated_at"):
+            # 本地有编辑记录，优先使用本地版本（避免 PATCH 后被数据服务器旧缓存覆盖）
+            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local updated_at exists, plan_id={plan_id}")
+            plan = local_plan
+        else:
+            plan = remote_plan
+            # 只有首次从数据服务器拿到有效 plan 时才缓存到本地
+            task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
-        plan = task_pool.get(rid)
+        plan = local_plan
 
     if plan is None:
         return None
