@@ -1469,7 +1469,7 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
         return None
 
     # 仅允许更新白名单字段；stages/teams/targets 可整段替换
-    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text"}
+    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text", "car_actions", "vehicle_summary"}
     for key, value in payload.items():
         if key in allowed_top_keys:
             existing[key] = copy.deepcopy(value)
