@@ -211,13 +211,12 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
 
         local_plan = task_pool.get(rid)
 
-        # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本，
-        # 使用本地数据后清除 local_dirty，后续请求再正常与远程比较。
+        # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本。
+        # local_dirty 由 sync_plan_to_operator 在同步成功后清除，避免删除/编辑后
+        # 第二次 get detail 被数据服务器旧缓存覆盖。
         if local_plan and local_plan.get("local_dirty"):
             print(f"[AS-DEBUG] get_plan_detail use local task_pool because local_dirty=true, plan_id={plan_id}")
             plan = local_plan
-            local_plan["local_dirty"] = False
-            task_pool.set(rid, local_plan)
         else:
             # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本，
             # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整数据。
@@ -1649,12 +1648,10 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
 
         # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本，
         # 避免删除/编辑后 actions 数量变少，被数据服务器旧缓存覆盖。
-        # 使用本地数据后清除 local_dirty，后续请求再正常与远程比较。
+        # local_dirty 由 sync_plan_to_operator 在同步成功后清除。
         if local_plan and local_plan.get("local_dirty"):
             print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local_dirty=true, plan_id={plan_id}")
             plan = local_plan
-            local_plan["local_dirty"] = False
-            task_pool.set(rid, local_plan)
         else:
             # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本。
             # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整假数据/编辑数据。
@@ -1798,8 +1795,24 @@ def sync_plan_to_operator(plan_id: str) -> bool:
         )
         if result is None:
             return False
-        # 同步成功，但保留 local_dirty 标记，让下一次 get_plan_detail 优先使用本地数据，
-        # 避免数据服务器 /simple 接口延迟/投影导致旧数据覆盖删除/编辑结果。
+        # 同步成功后立即拉取数据服务器最新数据并更新本地缓存，确保本地与远程一致。
+        # 同时清除 local_dirty，让后续 get_plan_detail 正常比较。
+        try:
+            remote = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+            if remote is not None and isinstance(remote, dict):
+                normalized = _normalize_plan_field_names(remote)
+                normalized["local_dirty"] = False
+                task_pool.set(rid, normalized)
+                print(f"[SYNC-PLAN] synced and refreshed local cache from remote, plan_id={plan_id}")
+            else:
+                # 拉取失败：保留 local_dirty，让后续 get_plan_detail 继续优先本地数据
+                local_plan = task_pool.get(rid)
+                if local_plan:
+                    local_plan["local_dirty"] = True
+                    task_pool.set(rid, local_plan)
+                print(f"[SYNC-PLAN] sync ok but refresh remote failed, keep local_dirty, plan_id={plan_id}")
+        except Exception as refresh_err:
+            print(f"[SYNC-PLAN] sync ok but refresh local cache failed: {refresh_err}, plan_id={plan_id}")
         return True
     except Exception as e:
         print(f"[SYNC-PLAN] sync to operator failed: {e}")
