@@ -1160,7 +1160,7 @@ def build_mission_data(
             try:
                 vmf = int(vid)
             except (ValueError, TypeError):
-                vmf = 99076716  # 兜底：ZD04 的示例 vmf
+                vmf = 99076716  # 兜底：ZD01 的示例 vmf
 
         vip = (vehicle_ips or {}).get(vid, "192.168.1.11")
         num = len(actions)
@@ -1271,7 +1271,7 @@ def get_first_vid(plan: Dict[str, Any]) -> str:
                         return vid
 
     # 3) fallback
-    return "ZD04"
+    return "ZD01"
 
 
 def build_control_mission_payload(
@@ -1292,7 +1292,7 @@ def build_control_mission_payload(
         vid = vehicle_vid
     else:
         plan = get_plan_detail(plan_id)
-        vid = get_first_vid(plan) if plan else "ZD04"
+        vid = get_first_vid(plan) if plan else "ZD01"
     # 去掉 equipment: 前缀（如 equipment:XL01 → XL01）
     vid = vid.replace("equipment:", "") if vid else vid
 

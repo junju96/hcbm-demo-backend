@@ -28,8 +28,8 @@ async def lifespan(app: FastAPI):
     zenoh_ok = zenoh_client.initialize(auto_subscribe_defaults=True)
     if zenoh_ok:
         print("[ZK Backend] Zenoh ready.")
-        # 自动订阅默认车辆 ZD04 的 MissionService 反馈
-        zenoh_client.subscribe_vehicle_feedbacks("ZD04")
+        # 自动订阅默认车辆 ZD01 的 MissionService 反馈
+        zenoh_client.subscribe_vehicle_feedbacks("ZD01")
     else:
         print(f"[ZK Backend] Zenoh init failed (may fall back to local-peer): {zenoh_client.get_last_zenoh_error()}")
 
