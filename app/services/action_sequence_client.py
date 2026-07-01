@@ -1613,42 +1613,48 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     if data is not None and isinstance(data, dict):
         remote_plan = _normalize_plan_field_names(data)
 
-        # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本。
-        # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整假数据/编辑数据。
-        def _count_actions(p):
-            if not p or not isinstance(p, dict):
-                return 0
-            count = 0
-            for stage in p.get("stages", []) or []:
-                team_actions = stage.get("team_actions", {})
-                if isinstance(team_actions, dict):
-                    for vlist in team_actions.values():
-                        if isinstance(vlist, list):
-                            for v in vlist:
-                                if isinstance(v, dict):
-                                    count += len(v.get("actions") or [])
-                elif isinstance(team_actions, list):
-                    for ta in team_actions:
-                        if not isinstance(ta, dict):
-                            continue
-                        for v in ta.get("car_actions", []) or []:
-                            if isinstance(v, dict):
-                                count += len(v.get("actions") or [])
-                        for v in ta.get("team_actions", []) or []:
-                            if isinstance(v, dict):
-                                count += len(v.get("actions") or [])
-            return count
-
-        local_actions = _count_actions(local_plan)
-        remote_actions = _count_actions(remote_plan)
-
-        if local_plan and local_actions >= remote_actions:
-            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
+        # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本，
+        # 避免删除/编辑后 actions 数量变少，被数据服务器旧缓存覆盖。
+        if local_plan and local_plan.get("local_dirty"):
+            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local_dirty=true, plan_id={plan_id}")
             plan = local_plan
         else:
-            print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}), plan_id={plan_id}")
-            plan = remote_plan
-            task_pool.set(rid, plan)
+            # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本。
+            # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整假数据/编辑数据。
+            def _count_actions(p):
+                if not p or not isinstance(p, dict):
+                    return 0
+                count = 0
+                for stage in p.get("stages", []) or []:
+                    team_actions = stage.get("team_actions", {})
+                    if isinstance(team_actions, dict):
+                        for vlist in team_actions.values():
+                            if isinstance(vlist, list):
+                                for v in vlist:
+                                    if isinstance(v, dict):
+                                        count += len(v.get("actions") or [])
+                    elif isinstance(team_actions, list):
+                        for ta in team_actions:
+                            if not isinstance(ta, dict):
+                                continue
+                            for v in ta.get("car_actions", []) or []:
+                                if isinstance(v, dict):
+                                    count += len(v.get("actions") or [])
+                            for v in ta.get("team_actions", []) or []:
+                                if isinstance(v, dict):
+                                    count += len(v.get("actions") or [])
+                return count
+
+            local_actions = _count_actions(local_plan)
+            remote_actions = _count_actions(remote_plan)
+
+            if local_plan and local_actions >= remote_actions:
+                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
+                plan = local_plan
+            else:
+                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}), plan_id={plan_id}")
+                plan = remote_plan
+                task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
         plan = local_plan
@@ -1718,6 +1724,8 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
             existing[key] = copy.deepcopy(value)
 
     existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # 标记本地 plan 已被修改但尚未成功同步到数据服务器
+    existing["local_dirty"] = True
     task_pool.set(rid, existing)
     return task_pool.get(rid)
 
@@ -1753,6 +1761,11 @@ def sync_plan_to_operator(plan_id: str) -> bool:
         )
         if result is None:
             return False
+        # 同步成功后清除本地 dirty 标记
+        synced = task_pool.get(rid)
+        if synced and isinstance(synced, dict):
+            synced["local_dirty"] = False
+            task_pool.set(rid, synced)
         return True
     except Exception as e:
         print(f"[SYNC-PLAN] sync to operator failed: {e}")
