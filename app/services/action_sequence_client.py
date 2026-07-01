@@ -418,6 +418,8 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
         plan["local_dirty"] = True
         task_pool.set(rid, plan)
         print(f"[AS-DEBUG] updated action param locally: plan_id={plan_id} action_id={action_id}")
+    else:
+        print(f"[AS-DEBUG] action not found locally: plan_id={plan_id} action_id={action_id} stages_team_actions_type={type(plan.get('stages',[{}])[0].get('team_actions')).__name__ if plan.get('stages') else 'no_stages'}")
 
     return updated or patch_ok
 
