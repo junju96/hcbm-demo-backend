@@ -6,6 +6,11 @@
 from datetime import datetime, timezone
 
 
+# 本地假数据调测开关，关闭后不再加载 fake action-sequence plan。
+# TODO: 联调/上线稳定后关闭此开关，并删除 _build_fake_action_sequence_plan 及相关合并逻辑。
+ENABLE_FAKE_ACTION_SEQUENCE_PLAN = True
+
+
 def preload_mock_data(task_pool):
     """启动时预置数据到内存存储"""
 
@@ -142,8 +147,10 @@ def preload_mock_data(task_pool):
 
     # ---------- 行动序列调测方案（fake） ----------
     # 依据《装备行动序列知识.md》，包含全部车型及其支持的全部 action_type
-    fake_plan = _build_fake_action_sequence_plan()
-    task_pool.set(fake_plan["resource_id"], fake_plan)
+    # TODO: 联调/上线稳定后移除 ENABLE_FAKE_ACTION_SEQUENCE_PLAN 开关及 fake plan 构造逻辑。
+    if ENABLE_FAKE_ACTION_SEQUENCE_PLAN:
+        fake_plan = _build_fake_action_sequence_plan()
+        task_pool.set(fake_plan["resource_id"], fake_plan)
 
     # ---------- 写入存储 ----------
     for t in targets:
