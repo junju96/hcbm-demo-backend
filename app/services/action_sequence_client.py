@@ -38,8 +38,6 @@ def _infer_resource_type_from_vid(vid: str) -> str:
         return "Electronic-UGV"
     if "air-ground" in vid:
         return "Air-Ground-UAV"
-    if "chassis" in vid:
-        return "Chassis-UGV"
     return ""
 
 
@@ -273,13 +271,14 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _infer_vehicle_type_from_action_type(action_type: str) -> str:
-    """根据 action_type 推断车辆类型，用于 plan.teams 中缺少 resource_type 时的兜底。"""
+    """根据 action_type 推断车辆类型，用于 plan.teams 中缺少 resource_type 时的兜底。
+
+    注意：底盘类元任务（Auto-Move 等）对所有车型通用，不能用于推断车型，
+    因此这里只根据各车型特有的载荷任务进行推断。
+    """
     t = (action_type or "").strip().lower()
     if not t:
         return ""
-    # 底盘类（通用）
-    if t in {"auto-move", "follow-move", "silent-guard", "set-return-point", "return-to-base", "formation-move", "manual-task", "pose-adjust"}:
-        return "Chassis-UGV"
     # 火力车
     if t in {"lens-recon", "search-and-shoot", "recon-strike", "rocket-launch", "loitering-munition-launch", "7.62mm-gun-shot", "gun-shot"}:
         return "Fire-Support-UGV"
@@ -573,12 +572,10 @@ def _resource_type_to_vehicle_type(resource_type: str) -> str:
     """把 plan.teams[].vehicles[].resource_type 归一化为内部车型标识"""
     rt = (resource_type or "").strip().lower().replace("-", "_")
     mapping = {
-        "chassis_ugv": "chassis",
         "fire_support_ugv": "fire_support",
         "recon_strike_ugv": "recon_strike",
         "patrol_ugv": "patrol",
         "electronic_ugv": "electronic",
-        "communication_ugv": "communication",
         "air_ground_uav": "air_ground",
         "air_ground_ugv": "air_ground",
     }
@@ -678,13 +675,6 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
             "light-deterrence": 55,
         }.get(t)
 
-    # 通信车 (sid 60~61)
-    if vt == "communication":
-        return {
-            "land-communication-relay": 60,
-            "air-communication-relay": 61,
-        }.get(t)
-
     # 电磁车 (sid 40~48，不含整车模式)
     if vt == "electronic":
         return {
@@ -703,7 +693,8 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
             "ag_air_recon": 71,
         }.get(t)
 
-    # fallback：按名称关键词推断
+    # 对无法识别车型的车辆，底盘类元任务已经返回 sid；
+    # 若仍无法解析，按名称关键词兜底推断。
     return _action_name_to_sid(name)
 
 
@@ -1387,22 +1378,16 @@ def publish_control_mission(
 # ========== 车辆类型与资源池映射 ==========
 
 VEHICLE_TYPE_DISPLAY_NAMES = {
-    "Chassis-UGV": "底盘车",
     "Fire-Support-UGV": "火力车",
     "Recon-Strike-UGV": "侦打车",
     "Patrol-UGV": "巡逻车",
     "Electronic-UGV": "电磁车",
-    "Communication-UGV": "通信车",
     "Air-Ground-UAV": "空地车",
 }
 
-# 各车型默认支持的 action_type（用于前端新建行动序列时初始化节点）。
-# 后续可改为根据资源池 equipment 的 payload/component 信息动态推断。
+# 各车型默认支持的载荷 action_type（用于前端新建行动序列时初始化节点）。
+# 底盘类元任务（Auto-Move/Follow-Move/Silent-Guard 等）对所有车型通用，不在这里维护。
 VEHICLE_ACTION_TYPES = {
-    "Chassis-UGV": [
-        "Auto-Move", "Follow-Move", "Silent-Guard", "Set-Return-Point",
-        "Return-To-Base", "Formation-Move", "Manual-Task", "Pose-Adjust",
-    ],
     "Fire-Support-UGV": [
         "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
         "Rocket-Launch", "Loitering-Munition-Launch",
@@ -1422,20 +1407,16 @@ VEHICLE_ACTION_TYPES = {
 # 资源池返回的 resource_type / model_type.description -> 内部车型映射
 _RESOURCE_TYPE_TO_VEHICLE = {
     # 常见 resource_type 写法
-    "Chassis-UGV": "Chassis-UGV",
     "Fire-Support-UGV": "Fire-Support-UGV",
     "Recon-Strike-UGV": "Recon-Strike-UGV",
     "Patrol-UGV": "Patrol-UGV",
     "Electronic-UGV": "Electronic-UGV",
-    "Communication-UGV": "Communication-UGV",
     "Air-Ground-UAV": "Air-Ground-UAV",
     # 中文描述兜底
-    "无人底盘车": "Chassis-UGV",
     "无人火力车": "Fire-Support-UGV",
     "无人侦察车": "Recon-Strike-UGV",
     "无人巡逻车": "Patrol-UGV",
     "无人电磁车": "Electronic-UGV",
-    "无人通信车": "Communication-UGV",
     "无人空地车": "Air-Ground-UAV",
     "空地车": "Air-Ground-UAV",
 }
