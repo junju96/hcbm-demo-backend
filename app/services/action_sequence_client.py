@@ -27,16 +27,34 @@ from app.services import zenoh_client
 
 
 def _infer_resource_type_from_vid(vid: str) -> str:
-    """从 equipment vid 推断 resource_type，用于数据服务器 team_equipments 为空时的兜底。"""
-    if "fire-support" in vid:
-        return "Fire-Support-UGV"
-    if "recon-strike" in vid:
+    """从 equipment vid 推断 resource_type，用于数据服务器 team_equipments 为空时的兜底。
+
+    支持真实装备编号前缀：
+      ZD/Recon-Strike-UGV, XL/Patrol-UGV, HL/Fire-Support-UGV,
+      DD/EM-UGV, KD/KD-UGV(Air-Ground-UAV)
+    """
+    v = (vid or "").lower()
+    # 真实装备编号前缀
+    if re.search(r"(^|[:_-])zd\d", v):
         return "Recon-Strike-UGV"
-    if "patrol" in vid:
+    if re.search(r"(^|[:_-])xl\d", v):
         return "Patrol-UGV"
-    if "electronic" in vid:
+    if re.search(r"(^|[:_-])hl\d", v):
+        return "Fire-Support-UGV"
+    if re.search(r"(^|[:_-])dd\d", v):
         return "Electronic-UGV"
-    if "air-ground" in vid:
+    if re.search(r"(^|[:_-])kd\d", v):
+        return "Air-Ground-UAV"
+    # 英文描述前缀兜底
+    if "fire-support" in v:
+        return "Fire-Support-UGV"
+    if "recon-strike" in v:
+        return "Recon-Strike-UGV"
+    if "patrol" in v:
+        return "Patrol-UGV"
+    if "electronic" in v:
+        return "Electronic-UGV"
+    if "air-ground" in v:
         return "Air-Ground-UAV"
     return ""
 
@@ -288,7 +306,9 @@ def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     if not t:
         return ""
     # 火力车
-    if t in {"lens-recon", "search-and-shoot", "recon-strike", "rocket-launch", "loitering-munition-launch", "7.62mm-gun-shot", "gun-shot"}:
+    # 注意：lens-recon / search-and-shoot / 7.62mm-gun-shot 为多车型通用载荷，
+    # 不能用于推断车型，否则会把侦打车/巡逻车误显示为火力车。
+    if t in {"rocket-launch", "loitering-munition-launch", "gun-shot"}:
         return "Fire-Support-UGV"
     # 侦打车
     if t in {"40mm-gun-launch", "at-missile-launch", "laser-illumination"}:
@@ -310,13 +330,20 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
     # 先建立 vid -> resource_type 映射（从 plan.teams 查找）
     team_type_map: Dict[str, str] = {}
     for team in plan.get("teams", []):
-        if isinstance(team, dict):
-            vehicles = team.get("vehicles", [])
-            for v in vehicles:
-                if isinstance(v, dict) and v.get("vid"):
-                    team_type_map[v["vid"]] = v.get("resource_type", "")
-            if team.get("vid"):
-                team_type_map[team["vid"]] = team.get("resource_type", "")
+        if not isinstance(team, dict):
+            continue
+        vehicles = team.get("vehicles", [])
+        team_resource_type = team.get("resource_type", "")
+        for v in vehicles:
+            if isinstance(v, dict) and v.get("vid"):
+                team_type_map[v["vid"]] = v.get("resource_type") or team_resource_type or ""
+            elif isinstance(v, str):
+                # 数据服务器 team_equipments 仅返回 vid 字符串时，
+                # 优先查在线车辆缓存，其次根据 vid 前缀推断。
+                cached = _online_vehicle_type_cache.get(v)
+                team_type_map[v] = cached or _infer_resource_type_from_vid(v) or ""
+        if team.get("vid"):
+            team_type_map[team["vid"]] = team_resource_type or ""
 
     # 车辆汇总：按 vid 聚合所有阶段中的行动
     vehicle_map: Dict[str, Dict[str, Any]] = {}
@@ -1414,12 +1441,14 @@ VEHICLE_ACTION_TYPES = {
 
 # 资源池返回的 resource_type / model_type.description -> 内部车型映射
 _RESOURCE_TYPE_TO_VEHICLE = {
-    # 常见 resource_type 写法
+    # 常见 resource_type / model_type 写法
     "Fire-Support-UGV": "Fire-Support-UGV",
     "Recon-Strike-UGV": "Recon-Strike-UGV",
     "Patrol-UGV": "Patrol-UGV",
     "Electronic-UGV": "Electronic-UGV",
+    "EM-UGV": "Electronic-UGV",
     "Air-Ground-UAV": "Air-Ground-UAV",
+    "KD-UGV": "Air-Ground-UAV",
     # 中文描述兜底
     "无人火力车": "Fire-Support-UGV",
     "无人侦察车": "Recon-Strike-UGV",
@@ -1450,6 +1479,12 @@ def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
 
     # 3) 兜底：返回原始 resource_type，让前端自行决定展示/映射
     return rt or "Unknown"
+
+
+# 在线车辆类型缓存：vid -> resource_type
+# 在 _fetch_vehicles_from_resource_pool 调用时更新，用于 _to_frontend_plan
+# 中 teams 只有 vid 字符串时也能正确识别车型。
+_online_vehicle_type_cache: Dict[str, str] = {}
 
 
 def _build_fallback_vehicles() -> List[Dict[str, Any]]:
@@ -1544,6 +1579,7 @@ def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
         vehicle = _transform_equipment_to_vehicle(item)
         if vehicle:
             result.append(vehicle)
+            _online_vehicle_type_cache[vehicle["vid"]] = vehicle["resource_type"]
     return result
 
 
