@@ -71,7 +71,11 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                     team_vehicle_pairs.append((team_id, car_actions))
                 else:
                     vehicles = ta.get("team_actions", [])
-                    team_vehicle_pairs.append((team_id, vehicles))
+                    if vehicles:
+                        team_vehicle_pairs.append((team_id, vehicles))
+                    # 防御性兼容：数组元素直接是 vehicle 对象（vid + actions）
+                    elif ta.get("vid") and ta.get("actions") is not None:
+                        team_vehicle_pairs.append((team_id, [ta]))
 
         for team_id, vehicles in team_vehicle_pairs:
             if not isinstance(vehicles, list):
@@ -1404,13 +1408,19 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                         return True
             return False
 
-        if not _has_actions(remote_plan) and local_plan:
-            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because data_server actions empty, plan_id={plan_id}")
+        if local_plan and _has_actions(local_plan):
+            # 本地有有效 actions，优先使用本地编辑版本
+            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local has actions, plan_id={plan_id}")
             plan = local_plan
         elif local_plan and local_plan.get("updated_at"):
-            # 本地有编辑记录，优先使用本地版本（避免 PATCH 后被数据服务器旧缓存覆盖）
-            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local updated_at exists, plan_id={plan_id}")
-            plan = local_plan
+            # 本地有编辑记录但 actions 为空：若远程有有效 actions 则使用远程，否则保留本地
+            if _has_actions(remote_plan):
+                print(f"[AS-DEBUG] get_plan_detail_operator use remote because remote has actions, plan_id={plan_id}")
+                plan = remote_plan
+                task_pool.set(rid, plan)
+            else:
+                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local updated_at exists, plan_id={plan_id}")
+                plan = local_plan
         else:
             plan = remote_plan
             # 只有首次从数据服务器拿到有效 plan 时才缓存到本地
@@ -1489,7 +1499,11 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
 
 
 def sync_plan_to_operator(plan_id: str) -> bool:
-    """把本地 task_pool 中的 plan 通过 PATCH /resources/{rid} 同步到操控席数据服务器。"""
+    """把本地 task_pool 中的 plan 通过 ingestion/import 同步到操控席数据服务器。
+
+    经过测试，PATCH /resources/{rid} 无法保存 stages.team_actions 等嵌套字段，
+    因此改用全量 import 方式 upsert，确保行动序列数据落盘到数据服务器。
+    """
     from app.services.task_pool import task_pool
 
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
@@ -1497,18 +1511,25 @@ def sync_plan_to_operator(plan_id: str) -> bool:
     if not plan:
         return False
     try:
-        result = _http_patch_operator(
-            f"/api/v1/task_pool/resources/{rid}",
-            {
-                "title": plan.get("title", ""),
-                "description": plan.get("description", ""),
-                "state": plan.get("state") or "DRAFT",
-                "search_text": plan.get("search_text", ""),
-                "payload": plan,
-            },
+        payload = {
+            "resource_id": rid,
+            "task_type": "PLAN",
+            "plan_id": plan.get("plan_id") or rid.replace("plan:", ""),
+            "title": plan.get("title", ""),
+            "description": plan.get("description", ""),
+            "state": plan.get("state") or "DRAFT",
+            "teams": plan.get("teams", []),
+            "targets": plan.get("targets", []),
+            "stages": plan.get("stages", []),
+        }
+        result = _http_post_operator(
+            "/api/v1/task_pool/ingestion/import",
+            {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
             silent=True,
         )
-        return result is not None
+        if result is None:
+            return False
+        return True
     except Exception as e:
         print(f"[SYNC-PLAN] sync to operator failed: {e}")
         return False
