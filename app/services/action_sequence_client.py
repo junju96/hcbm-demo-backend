@@ -272,6 +272,32 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _infer_vehicle_type_from_action_type(action_type: str) -> str:
+    """根据 action_type 推断车辆类型，用于 plan.teams 中缺少 resource_type 时的兜底。"""
+    t = (action_type or "").strip().lower()
+    if not t:
+        return ""
+    # 底盘类（通用）
+    if t in {"auto-move", "follow-move", "silent-guard", "set-return-point", "return-to-base", "formation-move", "manual-task", "pose-adjust"}:
+        return "Chassis-UGV"
+    # 火力车
+    if t in {"lens-recon", "search-and-shoot", "recon-strike", "rocket-launch", "loitering-munition-launch", "7.62mm-gun-shot", "gun-shot"}:
+        return "Fire-Support-UGV"
+    # 侦打车
+    if t in {"40mm-gun-launch", "at-missile-launch", "laser-illumination"}:
+        return "Recon-Strike-UGV"
+    # 巡逻车
+    if t in {"sound-expel", "acoustic-deterrence", "light-expel", "light-deterrence"}:
+        return "Patrol-UGV"
+    # 电磁车
+    if t in {"em-recon", "electronic-recon", "em-interference", "electronic-jamming", "payload-silent"}:
+        return "Electronic-UGV"
+    # 空地车
+    if t in {"air-recon", "air_recon", "ag_air_recon"}:
+        return "Air-Ground-UAV"
+    return ""
+
+
 def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
     """转换为前端需要的 Plan + ActionSequence 格式"""
     # 先建立 vid -> resource_type 映射（从 plan.teams 查找）
@@ -325,6 +351,19 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
                 "actions": actions,
                 "state": ca.get("state", "READY"),
             })
+
+    # 兜底：对仍无法识别车型的车辆，根据其 action_type 推断 resource_type
+    for vdata in vehicle_map.values():
+        if vdata["resource_type"]:
+            continue
+        for stage in vdata.get("stages", []):
+            for action in stage.get("actions", []):
+                inferred = _infer_vehicle_type_from_action_type(action.get("action_type", ""))
+                if inferred:
+                    vdata["resource_type"] = inferred
+                    break
+            if vdata["resource_type"]:
+                break
 
     # title fallback：plan.title -> tactic.title -> plan_id
     tactic = plan.get("tactic") or {}
