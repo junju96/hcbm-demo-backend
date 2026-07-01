@@ -211,28 +211,40 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
         # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
         plan = _normalize_plan_field_names(data)
 
-        # 如果数据服务端返回的 plan 没有有效 actions，fallback 到本地 task_pool（可能是用户编辑后的缓存或 fake 调测数据）
-        def _has_actions(p):
-            for stage in p.get("stages", []):
+        # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本，
+        # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整数据。
+        def _count_actions(p):
+            if not p or not isinstance(p, dict):
+                return 0
+            count = 0
+            for stage in p.get("stages", []) or []:
                 team_actions = stage.get("team_actions", {})
-                vehicles_list = []
                 if isinstance(team_actions, dict):
                     for vlist in team_actions.values():
                         if isinstance(vlist, list):
-                            vehicles_list.extend(vlist)
+                            for v in vlist:
+                                if isinstance(v, dict):
+                                    count += len(v.get("actions") or [])
                 elif isinstance(team_actions, list):
                     for ta in team_actions:
-                        vehicles_list.extend(ta.get("car_actions", []) or ta.get("team_actions", []) or [])
-                for v in vehicles_list:
-                    if v.get("actions"):
-                        return True
-            return False
+                        if not isinstance(ta, dict):
+                            continue
+                        for v in ta.get("car_actions", []) or []:
+                            if isinstance(v, dict):
+                                count += len(v.get("actions") or [])
+                        for v in ta.get("team_actions", []) or []:
+                            if isinstance(v, dict):
+                                count += len(v.get("actions") or [])
+            return count
 
-        if not _has_actions(plan):
-            local_plan = task_pool.get(rid)
-            if local_plan:
-                print(f"[AS-DEBUG] get_plan_detail use local task_pool because data_server actions empty, plan_id={plan_id}")
-                plan = local_plan
+        local_plan = task_pool.get(rid)
+        local_actions = _count_actions(local_plan)
+        remote_actions = _count_actions(plan)
+        if local_plan and local_actions > remote_actions:
+            print(f"[AS-DEBUG] get_plan_detail use local task_pool (actions={local_actions} > remote={remote_actions}), plan_id={plan_id}")
+            plan = local_plan
+        else:
+            print(f"[AS-DEBUG] get_plan_detail use remote (remote_actions={remote_actions} >= local={local_actions}), plan_id={plan_id}")
 
         # 同步缓存到本地 task_pool，方便后续 PATCH 更新
         task_pool.set(rid, plan)
@@ -1601,39 +1613,41 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     if data is not None and isinstance(data, dict):
         remote_plan = _normalize_plan_field_names(data)
 
-        # 如果数据服务端返回的 plan 没有有效 actions，且本地有编辑过的 plan，则使用本地 plan
-        def _has_actions(p):
-            for stage in p.get("stages", []):
+        # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本。
+        # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整假数据/编辑数据。
+        def _count_actions(p):
+            if not p or not isinstance(p, dict):
+                return 0
+            count = 0
+            for stage in p.get("stages", []) or []:
                 team_actions = stage.get("team_actions", {})
-                vehicles_list = []
                 if isinstance(team_actions, dict):
                     for vlist in team_actions.values():
                         if isinstance(vlist, list):
-                            vehicles_list.extend(vlist)
+                            for v in vlist:
+                                if isinstance(v, dict):
+                                    count += len(v.get("actions") or [])
                 elif isinstance(team_actions, list):
                     for ta in team_actions:
-                        vehicles_list.extend(ta.get("car_actions", []) or ta.get("team_actions", []) or [])
-                for v in vehicles_list:
-                    if v.get("actions"):
-                        return True
-            return False
+                        if not isinstance(ta, dict):
+                            continue
+                        for v in ta.get("car_actions", []) or []:
+                            if isinstance(v, dict):
+                                count += len(v.get("actions") or [])
+                        for v in ta.get("team_actions", []) or []:
+                            if isinstance(v, dict):
+                                count += len(v.get("actions") or [])
+            return count
 
-        if local_plan and _has_actions(local_plan):
-            # 本地有有效 actions，优先使用本地编辑版本
-            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local has actions, plan_id={plan_id}")
+        local_actions = _count_actions(local_plan)
+        remote_actions = _count_actions(remote_plan)
+
+        if local_plan and local_actions >= remote_actions:
+            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
             plan = local_plan
-        elif local_plan and local_plan.get("updated_at"):
-            # 本地有编辑记录但 actions 为空：若远程有有效 actions 则使用远程，否则保留本地
-            if _has_actions(remote_plan):
-                print(f"[AS-DEBUG] get_plan_detail_operator use remote because remote has actions, plan_id={plan_id}")
-                plan = remote_plan
-                task_pool.set(rid, plan)
-            else:
-                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local updated_at exists, plan_id={plan_id}")
-                plan = local_plan
         else:
+            print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}), plan_id={plan_id}")
             plan = remote_plan
-            # 只有首次从数据服务器拿到有效 plan 时才缓存到本地
             task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
