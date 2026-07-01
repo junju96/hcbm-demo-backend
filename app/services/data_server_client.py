@@ -19,6 +19,7 @@ except ImportError:
 
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
 OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"  # 操控席数据服务端（后续可独立配置）
+RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"  # 资源池重构版服务端口
 TIMEOUT_SECONDS = (1, 2)  # (connect timeout, read timeout)；连接 1s、读取 2s，断连时快速失败
 MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
 
@@ -254,6 +255,25 @@ def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = 
     except Exception as e:
         if not silent:
             print(f"[OP-DS-ERR] GET  {url} | error={e}")
+        return None
+
+
+def _http_get_resource_pool(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+    """向资源池服务（resource_pool_refactor）发送 GET 请求"""
+    if not HAS_REQUESTS:
+        return None
+    url = f"{RESOURCE_POOL_BASE_URL}{path}"
+    try:
+        if not silent:
+            print(f"[RP-OUT] GET  {url} | params={params}")
+        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        if not silent:
+            print(f"[RP-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        if not silent:
+            print(f"[RP-ERR] GET  {url} | error={e}")
         return None
 
 

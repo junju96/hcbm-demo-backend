@@ -17,7 +17,11 @@ import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
-from app.services.data_server_client import _http_get, _http_post, _http_patch, _http_get_operator, _http_post_operator, _http_patch_operator
+from app.services.data_server_client import (
+    _http_get, _http_post, _http_patch,
+    _http_get_operator, _http_post_operator, _http_patch_operator,
+    _http_get_resource_pool,
+)
 from app.services.task_pool import task_pool
 from app.services import zenoh_client
 
@@ -1471,53 +1475,53 @@ def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[
     }
 
 
-def query_online_vehicles() -> List[Dict[str, Any]]:
-    """从资源池查询当前已连接（online）的无人车列表（协同席数据服务器）。
-
-    资源池不可达时返回本地调试 fallback 车辆列表。
-    """
-    data = _http_get(
+def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
+    """内部：从资源池获取车辆列表。优先 online，若没有则回退全部 equipment。"""
+    # 1) 优先获取 online 车辆
+    data = _http_get_resource_pool(
         "/api/v1/resource_pool/resources",
         params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
         silent=True,
     )
-    if data is None:
-        print("[AS-DEBUG] query_online_vehicles: resource_pool unreachable, use fallback")
-        return _build_fallback_vehicles()
-
     items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+
+    # 2) 没有 online 车辆时，尝试获取全部 equipment（可能资源池未标记在线状态）
+    if not items:
+        data = _http_get_resource_pool(
+            "/api/v1/resource_pool/resources",
+            params={"entity_kind": "equipment", "limit": 100},
+            silent=True,
+        )
+        items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+
     result = []
     for item in items:
         vehicle = _transform_equipment_to_vehicle(item)
         if vehicle:
             result.append(vehicle)
-    if not result:
-        print("[AS-DEBUG] query_online_vehicles: no recognizable online vehicles, use fallback")
-        return _build_fallback_vehicles()
     return result
+
+
+def query_online_vehicles() -> List[Dict[str, Any]]:
+    """从资源池查询当前已连接（online）的无人车列表。
+
+    资源池服务独立部署在 28800 端口（与 task_pool 28801 区分）。
+    资源池不可达或没有可识别车辆时返回本地调试 fallback 车辆列表。
+    """
+    result = _fetch_vehicles_from_resource_pool()
+    if result:
+        return result
+    print("[AS-DEBUG] query_online_vehicles: no vehicles from resource_pool, use fallback")
+    return _build_fallback_vehicles()
 
 
 def query_online_vehicles_operator() -> List[Dict[str, Any]]:
-    """从资源池查询当前已连接（online）的无人车列表（操控席数据服务器）。"""
-    data = _http_get_operator(
-        "/api/v1/resource_pool/resources",
-        params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
-        silent=True,
-    )
-    if data is None:
-        print("[AS-DEBUG] query_online_vehicles_operator: resource_pool unreachable, use fallback")
-        return _build_fallback_vehicles()
-
-    items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
-    result = []
-    for item in items:
-        vehicle = _transform_equipment_to_vehicle(item)
-        if vehicle:
-            result.append(vehicle)
-    if not result:
-        print("[AS-DEBUG] query_online_vehicles_operator: no recognizable online vehicles, use fallback")
-        return _build_fallback_vehicles()
-    return result
+    """从资源池查询当前已连接（online）的无人车列表（操控席视角，资源池服务共用）。"""
+    result = _fetch_vehicles_from_resource_pool()
+    if result:
+        return result
+    print("[AS-DEBUG] query_online_vehicles_operator: no vehicles from resource_pool, use fallback")
+    return _build_fallback_vehicles()
 
 
 # ==================== 操控席数据服务端接口 ====================
