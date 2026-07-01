@@ -426,26 +426,15 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
     """
     更新 plan 中指定 action 的 param。
 
-    策略：
-      1. 尝试 PATCH 数据服务器（如果数据服务端支持 action param 更新）。
-      2. 同时同步更新本地 task_pool 中的缓存数据，保证前端编辑结果可立即生效。
-         本地缓存可用于数据服务器不可达或 /simple 接口未返回完整 actions 时的 fallback。
+    数据服务器目前不支持直接 PATCH /resources/{rid}/actions/{action_id}，
+    该接口会返回 404；也不支持通过 PATCH /resources/{rid} 保存 stages.team_actions
+    等嵌套字段。因此本函数只更新本地 task_pool 缓存，并标记 local_dirty，让后续
+    get_plan_detail 优先返回本地编辑结果。需要持久化到数据服务器时，由调用方通过
+    sync/plan import 等更高层接口完成。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    # 1. 最佳努力 PATCH 数据服务器
-    patch_ok = False
-    try:
-        resp = _http_patch(
-            f"/api/v1/task_pool/resources/{rid}/actions/{action_id}",
-            {"action_id": action_id, "param": param},
-            silent=True,
-        )
-        patch_ok = resp is not None
-    except Exception:
-        pass
-
-    # 2. 确保本地 task_pool 中有该 plan 的缓存
+    # 1. 确保本地 task_pool 中有该 plan 的缓存
     plan = task_pool.get(rid)
     if plan is None:
         data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
@@ -454,10 +443,10 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
             task_pool.set(rid, plan)
 
     if plan is None:
-        # 本地没有缓存且服务器不可达，无法更新
-        return patch_ok
+        # 本地没有缓存，无法更新
+        return False
 
-    # 3. 在 plan.stages[].team_actions 中查找并更新 action.param
+    # 2. 在 plan.stages[].team_actions 中查找并更新 action.param
     updated = False
     for stage in plan.get("stages", []):
         team_actions = stage.get("team_actions", {})
@@ -494,30 +483,20 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
     else:
         print(f"[AS-DEBUG] action not found locally: plan_id={plan_id} action_id={action_id} stages_team_actions_type={type(plan.get('stages',[{}])[0].get('team_actions')).__name__ if plan.get('stages') else 'no_stages'}")
 
-    return updated or patch_ok
+    return updated
 
 
 def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
     """
-    操控端：更新本地 task_pool 中指定 action 的 param，并最佳努力 PATCH 操控席数据服务器。
-    与 update_action_param 区别：只操作操控席本地缓存 / operator 数据服务器，
-    避免操控端编辑参数后被 refreshDetail(operator) 重新拉取旧数据覆盖。
+    操控端：更新本地 task_pool 中指定 action 的 param。
+
+    操控席数据服务器目前不支持直接 PATCH /resources/{rid}/actions/{action_id}，
+    因此本函数只更新操控席本地 task_pool 缓存，并标记 local_dirty。需要持久化到
+    数据服务器时，由前端调用 syncOperatorPlanToDataServer 完成。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    # 1. 最佳努力 PATCH 操控席数据服务器
-    patch_ok = False
-    try:
-        resp = _http_patch_operator(
-            f"/api/v1/task_pool/resources/{rid}/actions/{action_id}",
-            {"action_id": action_id, "param": param},
-            silent=True,
-        )
-        patch_ok = resp is not None
-    except Exception:
-        pass
-
-    # 2. 确保本地 task_pool 中有该 plan 的缓存
+    # 1. 确保本地 task_pool 中有该 plan 的缓存
     plan = task_pool.get(rid)
     if plan is None:
         data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
@@ -526,9 +505,9 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
             task_pool.set(rid, plan)
 
     if plan is None:
-        return patch_ok
+        return False
 
-    # 3. 在 plan.stages[].team_actions 中查找并更新 action.param
+    # 2. 在 plan.stages[].team_actions 中查找并更新 action.param
     updated = False
     for stage in plan.get("stages", []):
         team_actions = stage.get("team_actions", {})
@@ -562,7 +541,7 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
     else:
         print(f"[AS-DEBUG] operator action not found locally: plan_id={plan_id} action_id={action_id}")
 
-    return updated or patch_ok
+    return updated
 
 
 # ========== 行动序列运行时状态管理（内存） ==========
