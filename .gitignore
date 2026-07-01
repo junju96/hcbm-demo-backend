@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.env
+
+# Logs
+*.log
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
