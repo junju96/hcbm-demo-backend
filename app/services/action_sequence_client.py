@@ -1191,6 +1191,7 @@ def build_mission_data(
         mission_vehicles.append({
             "vid": vmf,
             "cnt": f"{vid}任务",
+            "num": num,
             "acts": acts,
         })
 
