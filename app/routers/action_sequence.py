@@ -35,6 +35,8 @@ from app.services.action_sequence_client import (
     create_operator_plan,
     update_operator_plan_locally,
     sync_plan_to_operator,
+    query_online_vehicles,
+    query_online_vehicles_operator,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
@@ -66,6 +68,13 @@ async def list_plans(limit: int = 20):
 async def list_resources_by_type(task_type: str, limit: int = 50):
     """按类型查询资源池资源（ROUTE / AREA / TARGET / EQUIPMENT 等）"""
     items = task_pool.query(task_type=task_type.upper(), limit=limit)
+    return ApiResponse(data={"items": items, "total": len(items)})
+
+
+@router.get("/action-sequences/vehicles", response_model=ApiResponse)
+async def list_online_vehicles():
+    """协同席 — 从资源池获取当前已连接的无人车列表"""
+    items = query_online_vehicles()
     return ApiResponse(data={"items": items, "total": len(items)})
 
 
@@ -197,6 +206,13 @@ async def dispatch_plan(plan_id: str, body: DispatchRequest):
 
 
 # ========== 操控端行动序列专用接口 ==========
+
+@router.get("/action-sequences/operator/vehicles", response_model=ApiResponse)
+async def list_online_vehicles_operator():
+    """操控端 — 从操控席数据服务端获取当前已连接的无人车列表"""
+    items = query_online_vehicles_operator()
+    return ApiResponse(data={"items": items, "total": len(items)})
+
 
 @router.get("/action-sequences/operator/plans", response_model=ApiResponse)
 async def list_plans_operator(limit: int = 20):

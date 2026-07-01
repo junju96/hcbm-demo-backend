@@ -1324,6 +1324,202 @@ def publish_control_mission(
         return False, f"Zenoh 下发失败: {err}"
 
 
+# ========== 车辆类型与资源池映射 ==========
+
+VEHICLE_TYPE_DISPLAY_NAMES = {
+    "Chassis-UGV": "底盘车",
+    "Fire-Support-UGV": "火力车",
+    "Recon-Strike-UGV": "侦打车",
+    "Patrol-UGV": "巡逻车",
+    "Electronic-UGV": "电磁车",
+    "Communication-UGV": "通信车",
+    "Air-Ground-UAV": "空地车",
+}
+
+# 各车型默认支持的 action_type（用于前端新建行动序列时初始化节点）。
+# 后续可改为根据资源池 equipment 的 payload/component 信息动态推断。
+VEHICLE_ACTION_TYPES = {
+    "Chassis-UGV": [
+        "Auto-Move", "Follow-Move", "Silent-Guard", "Set-Return-Point",
+        "Return-To-Base", "Formation-Move", "Manual-Task", "Pose-Adjust",
+    ],
+    "Fire-Support-UGV": [
+        "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
+        "Rocket-Launch", "Loitering-Munition-Launch",
+    ],
+    "Recon-Strike-UGV": [
+        "Lens-Recon", "Search-And-Shoot", "40mm-Gun-Launch",
+        "AT-Missile-Launch", "7.62mm-Gun-Shot", "Laser-Illumination",
+    ],
+    "Patrol-UGV": [
+        "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
+        "Sound-Expel", "Light-Expel",
+    ],
+    "Electronic-UGV": ["EM-Recon", "EM-Interference", "Payload-Silent"],
+    "Air-Ground-UAV": ["Air-Recon"],
+}
+
+# 资源池返回的 resource_type / model_type.description -> 内部车型映射
+_RESOURCE_TYPE_TO_VEHICLE = {
+    # 常见 resource_type 写法
+    "Chassis-UGV": "Chassis-UGV",
+    "Fire-Support-UGV": "Fire-Support-UGV",
+    "Recon-Strike-UGV": "Recon-Strike-UGV",
+    "Patrol-UGV": "Patrol-UGV",
+    "Electronic-UGV": "Electronic-UGV",
+    "Communication-UGV": "Communication-UGV",
+    "Air-Ground-UAV": "Air-Ground-UAV",
+    # 中文描述兜底
+    "无人底盘车": "Chassis-UGV",
+    "无人火力车": "Fire-Support-UGV",
+    "无人侦察车": "Recon-Strike-UGV",
+    "无人巡逻车": "Patrol-UGV",
+    "无人电磁车": "Electronic-UGV",
+    "无人通信车": "Communication-UGV",
+    "无人空地车": "Air-Ground-UAV",
+    "空地车": "Air-Ground-UAV",
+}
+
+
+def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
+    """从资源池 equipment 记录推断内部车辆类型。"""
+    # 1) 优先使用 resource_type
+    rt = (equipment.get("resource_type") or "").strip()
+    if rt in VEHICLE_TYPE_DISPLAY_NAMES:
+        return rt
+    if rt in _RESOURCE_TYPE_TO_VEHICLE:
+        return _RESOURCE_TYPE_TO_VEHICLE[rt]
+
+    # 2) 其次 model_type.description / model_type.type
+    model = equipment.get("model_type") or {}
+    for key in ("description", "type"):
+        md = (model.get(key) or "").strip()
+        if md in VEHICLE_TYPE_DISPLAY_NAMES:
+            return md
+        if md in _RESOURCE_TYPE_TO_VEHICLE:
+            return _RESOURCE_TYPE_TO_VEHICLE[md]
+
+    # 3) 兜底：返回原始 resource_type，让前端自行决定展示/映射
+    return rt or "Unknown"
+
+
+def _build_fallback_vehicles() -> List[Dict[str, Any]]:
+    """资源池不可达时的本地调试 fallback：返回五型无人车。"""
+    return [
+        {
+            "vid": "equipment:recon-strike-01",
+            "resource_name": "侦打车-01",
+            "resource_type": "Recon-Strike-UGV",
+            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Recon-Strike-UGV"],
+            "supported_action_types": VEHICLE_ACTION_TYPES["Recon-Strike-UGV"],
+            "is_mock": True,
+        },
+        {
+            "vid": "equipment:fire-support-01",
+            "resource_name": "火力车-01",
+            "resource_type": "Fire-Support-UGV",
+            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Fire-Support-UGV"],
+            "supported_action_types": VEHICLE_ACTION_TYPES["Fire-Support-UGV"],
+            "is_mock": True,
+        },
+        {
+            "vid": "equipment:patrol-01",
+            "resource_name": "巡逻车-01",
+            "resource_type": "Patrol-UGV",
+            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Patrol-UGV"],
+            "supported_action_types": VEHICLE_ACTION_TYPES["Patrol-UGV"],
+            "is_mock": True,
+        },
+        {
+            "vid": "equipment:electronic-01",
+            "resource_name": "电磁车-01",
+            "resource_type": "Electronic-UGV",
+            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Electronic-UGV"],
+            "supported_action_types": VEHICLE_ACTION_TYPES["Electronic-UGV"],
+            "is_mock": True,
+        },
+        {
+            "vid": "equipment:air-ground-01",
+            "resource_name": "空地车-01",
+            "resource_type": "Air-Ground-UAV",
+            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Air-Ground-UAV"],
+            "supported_action_types": VEHICLE_ACTION_TYPES["Air-Ground-UAV"],
+            "is_mock": True,
+        },
+    ]
+
+
+def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把资源池 equipment 记录转换为前端需要的 vehicle 结构。"""
+    rid = equipment.get("resource_id", "")
+    if not rid:
+        return None
+
+    vehicle_type = _infer_vehicle_type(equipment)
+    if not vehicle_type or vehicle_type == "Unknown":
+        # 无法识别的类型，跳过（或保留原始类型由前端处理）
+        return None
+
+    return {
+        "vid": rid,
+        "resource_name": equipment.get("resource_name") or rid.replace("equipment:", ""),
+        "resource_type": vehicle_type,
+        "display_name": VEHICLE_TYPE_DISPLAY_NAMES.get(vehicle_type, vehicle_type),
+        "supported_action_types": VEHICLE_ACTION_TYPES.get(vehicle_type, []),
+        "online_status": equipment.get("online_status") or "UNKNOWN",
+        "is_mock": False,
+    }
+
+
+def query_online_vehicles() -> List[Dict[str, Any]]:
+    """从资源池查询当前已连接（online）的无人车列表（协同席数据服务器）。
+
+    资源池不可达时返回本地调试 fallback 车辆列表。
+    """
+    data = _http_get(
+        "/api/v1/resource_pool/resources",
+        params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
+        silent=True,
+    )
+    if data is None:
+        print("[AS-DEBUG] query_online_vehicles: resource_pool unreachable, use fallback")
+        return _build_fallback_vehicles()
+
+    items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+    result = []
+    for item in items:
+        vehicle = _transform_equipment_to_vehicle(item)
+        if vehicle:
+            result.append(vehicle)
+    if not result:
+        print("[AS-DEBUG] query_online_vehicles: no recognizable online vehicles, use fallback")
+        return _build_fallback_vehicles()
+    return result
+
+
+def query_online_vehicles_operator() -> List[Dict[str, Any]]:
+    """从资源池查询当前已连接（online）的无人车列表（操控席数据服务器）。"""
+    data = _http_get_operator(
+        "/api/v1/resource_pool/resources",
+        params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
+        silent=True,
+    )
+    if data is None:
+        print("[AS-DEBUG] query_online_vehicles_operator: resource_pool unreachable, use fallback")
+        return _build_fallback_vehicles()
+
+    items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+    result = []
+    for item in items:
+        vehicle = _transform_equipment_to_vehicle(item)
+        if vehicle:
+            result.append(vehicle)
+    if not result:
+        print("[AS-DEBUG] query_online_vehicles_operator: no recognizable online vehicles, use fallback")
+        return _build_fallback_vehicles()
+    return result
+
+
 # ==================== 操控席数据服务端接口 ====================
 
 
