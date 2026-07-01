@@ -25,6 +25,7 @@ from app.services.action_sequence_client import (
     query_plans,
     get_plan_detail,
     update_action_param,
+    update_operator_action_param,
     get_first_vid,
     action_runtime,
     build_mission_payload,
@@ -96,6 +97,19 @@ async def get_plan(plan_id: str):
 async def patch_action_param(plan_id: str, action_id: str, body: ActionParamUpdateRequest):
     """更新指定 action 的 param（支持本地 fake 数据调试）"""
     ok = update_action_param(plan_id, action_id, body.param)
+    if not ok:
+        return ApiResponse(code=404, message="Action not found or update failed", data=None)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action_id": action_id,
+        "updated": True,
+    })
+
+
+@router.patch("/action-sequences/operator/plans/{plan_id}/actions/{action_id}", response_model=ApiResponse)
+async def patch_operator_action_param(plan_id: str, action_id: str, body: ActionParamUpdateRequest):
+    """操控端 — 更新指定 action 的 param（仅更新本地 task_pool，不同步到数据服务器）"""
+    ok = update_operator_action_param(plan_id, action_id, body.param)
     if not ok:
         return ApiResponse(code=404, message="Action not found or update failed", data=None)
     return ApiResponse(data={

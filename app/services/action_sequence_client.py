@@ -497,6 +497,74 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
     return updated or patch_ok
 
 
+def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
+    """
+    操控端：更新本地 task_pool 中指定 action 的 param，并最佳努力 PATCH 操控席数据服务器。
+    与 update_action_param 区别：只操作操控席本地缓存 / operator 数据服务器，
+    避免操控端编辑参数后被 refreshDetail(operator) 重新拉取旧数据覆盖。
+    """
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+
+    # 1. 最佳努力 PATCH 操控席数据服务器
+    patch_ok = False
+    try:
+        resp = _http_patch_operator(
+            f"/api/v1/task_pool/resources/{rid}/actions/{action_id}",
+            {"action_id": action_id, "param": param},
+            silent=True,
+        )
+        patch_ok = resp is not None
+    except Exception:
+        pass
+
+    # 2. 确保本地 task_pool 中有该 plan 的缓存
+    plan = task_pool.get(rid)
+    if plan is None:
+        data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+        if data is not None and isinstance(data, dict):
+            plan = _normalize_plan_field_names(data)
+            task_pool.set(rid, plan)
+
+    if plan is None:
+        return patch_ok
+
+    # 3. 在 plan.stages[].team_actions 中查找并更新 action.param
+    updated = False
+    for stage in plan.get("stages", []):
+        team_actions = stage.get("team_actions", {})
+        vehicles: List[Dict[str, Any]] = []
+        if isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                if isinstance(vlist, list):
+                    vehicles.extend(vlist)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles.extend(ta.get("car_actions", []))
+                if not ta.get("car_actions"):
+                    vehicles.extend(ta.get("team_actions", []))
+
+        for vehicle in vehicles:
+            for action in vehicle.get("actions", []):
+                if action.get("action_id") == action_id:
+                    action["param"] = copy.deepcopy(param)
+                    updated = True
+                    break
+            if updated:
+                break
+        if updated:
+            break
+
+    if updated:
+        plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+        plan["local_dirty"] = True
+        task_pool.set(rid, plan)
+        print(f"[AS-DEBUG] updated operator action param locally: plan_id={plan_id} action_id={action_id}")
+    else:
+        print(f"[AS-DEBUG] operator action not found locally: plan_id={plan_id} action_id={action_id}")
+
+    return updated or patch_ok
+
+
 # ========== 行动序列运行时状态管理（内存） ==========
 
 class ActionSequenceRuntime:
