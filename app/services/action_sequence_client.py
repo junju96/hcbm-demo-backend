@@ -414,6 +414,8 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
 
     if updated:
         plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # 标记本地已被修改，避免后续 get_plan_detail 被数据服务器旧缓存覆盖
+        plan["local_dirty"] = True
         task_pool.set(rid, plan)
         print(f"[AS-DEBUG] updated action param locally: plan_id={plan_id} action_id={action_id}")
 
