@@ -1812,7 +1812,11 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
             # 额外比较车辆集合：删除整辆车后 actions 数量必然减少，但不能因此回退到远程旧数据。
             def _collect_vids(p):
                 vids = set()
+                if not p or not isinstance(p, dict):
+                    return vids
                 for stage in p.get("stages", []) or []:
+                    if not isinstance(stage, dict):
+                        continue
                     team_actions = stage.get("team_actions", {})
                     if isinstance(team_actions, dict):
                         for vlist in team_actions.values():
@@ -1821,6 +1825,8 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                                     vids.add(v["vid"])
                     elif isinstance(team_actions, list):
                         for ta in team_actions:
+                            if not isinstance(ta, dict):
+                                continue
                             for v in ta.get("car_actions", []) or []:
                                 if isinstance(v, dict) and v.get("vid"):
                                     vids.add(v["vid"])
@@ -1828,7 +1834,7 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                                 if isinstance(v, dict) and v.get("vid"):
                                     vids.add(v["vid"])
                 for v in p.get("vehicle_summary", []) or []:
-                    if v.get("vid"):
+                    if isinstance(v, dict) and v.get("vid"):
                         vids.add(v["vid"])
                 return vids
 
