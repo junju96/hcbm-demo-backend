@@ -296,6 +296,44 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _infer_action_type_from_action_id(action_id: str) -> str:
+    """当 action_type 为空或 Unknown 时，根据 action_id 推断标准 action_type。"""
+    aid = (action_id or "").strip().lower().replace("_", "-")
+    if not aid:
+        return ""
+    # 常见 action_id -> action_type 映射
+    mapping = {
+        "auto-move": "auto-move",
+        "follow-move": "follow-move",
+        "formation-move": "formation-move",
+        "silent-guard": "silent-guard",
+        "set-return-point": "set-return-point",
+        "return-to-base": "return-to-base",
+        "manual-task": "manual-task",
+        "pose-adjust": "pose-adjust",
+        "air-recon": "air-recon",
+        "lens-recon": "lens-recon",
+        "search-and-shoot": "search-and-shoot",
+        "recon-strike": "recon-strike",
+        "40mm-gun-launch": "40mm-gun-launch",
+        "gun-shot": "gun-shot",
+        "7.62mm-gun-shot": "7.62mm-gun-shot",
+        "rocket-launch": "rocket-launch",
+        "loitering-munition-launch": "loitering-munition-launch",
+        "laser-illumination": "laser-illumination",
+        "sound-expel": "sound-expel",
+        "acoustic-deterrence": "acoustic-deterrence",
+        "light-expel": "light-expel",
+        "light-deterrence": "light-deterrence",
+        "em-recon": "em-recon",
+        "electronic-recon": "electronic-recon",
+        "em-interference": "em-interference",
+        "electronic-jamming": "electronic-jamming",
+        "payload-silent": "payload-silent",
+    }
+    return mapping.get(aid) or aid
+
+
 def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     """根据 action_type 推断车辆类型，用于 plan.teams 中缺少 resource_type 时的兜底。
 
@@ -358,10 +396,16 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
                 "stages": [],
             }
         actions = ca.get("actions", [])
-        action_type = ca.get("action_type", "")
-        # 把 car_actions 的 action_type 注入到每个 action 中
-        if action_type:
-            actions = [dict(a, action_type=action_type) for a in actions]
+        car_action_type = ca.get("action_type", "")
+        # 把 car_actions 的 action_type 注入到每个 action 中；
+        # 若 car_action_type 为空或为 Unknown，则尝试从 action 自身 action_id 推断。
+        normalized_actions = []
+        for a in actions:
+            at = car_action_type or a.get("action_type", "")
+            if not at or at.lower() in ("unknown", "unknown_action"):
+                at = _infer_action_type_from_action_id(a.get("action_id", ""))
+            normalized_actions.append(dict(a, action_type=at))
+        actions = normalized_actions
 
         # 同一个 stage_id 已存在则合并 actions，避免重复 stage
         existing_stage = next(
