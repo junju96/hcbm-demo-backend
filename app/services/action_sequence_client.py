@@ -1983,4 +1983,114 @@ def sync_plan_to_operator(plan_id: str) -> bool:
         return False
 
 
+def _mark_resource_deleted_on_operator(resource_id: str) -> bool:
+    """调用数据服务器 PATCH 接口，将指定资源 raw_payload.state 置为 DELETED。"""
+    if not resource_id:
+        return False
+    try:
+        resp = _http_patch_operator(
+            f"/api/v1/task_pool/resources/{resource_id}",
+            {"payload": {"raw_payload": {"state": "DELETED"}}},
+            silent=True,
+        )
+        return resp is not None and isinstance(resp, dict)
+    except Exception as e:
+        print(f"[DELETE-VEHICLE] mark {resource_id} deleted failed: {e}")
+        return False
+
+
+def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
+    """删除操控席方案中指定车辆的行动序列。
+
+    逻辑：
+    1. 从本地 plan 找到该车辆对应的所有 car_actions 及下属 actions；
+    2. 依次调用数据服务器 PATCH 把 action / car_action 的 state 置为 DELETED；
+    3. 更新本地 task_pool，移除该车辆；
+    4. 调用 sync_plan_to_operator 把更新后的 plan 同步到数据服务器。
+    """
+    from app.services.task_pool import task_pool
+
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    plan = task_pool.get(rid)
+    if not plan:
+        return {"ok": False, "error": "Plan not found in local task_pool"}
+
+    deleted_action_ids = []
+    deleted_car_action_ids = []
+
+    # 1) 处理 stages.team_actions 中的 car_actions
+    for stage in plan.get("stages", []) or []:
+        team_actions = stage.get("team_actions", {})
+        car_actions_list = []
+        if isinstance(team_actions, list):
+            for entry in team_actions:
+                car_actions_list.extend(entry.get("car_actions") or [])
+                car_actions_list.extend(entry.get("team_actions") or [])
+        elif isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                car_actions_list.extend(vlist or [])
+
+        for ca in car_actions_list:
+            if ca.get("vid") != vid:
+                continue
+            ca_rid = ca.get("resource_id") or ca.get("car_actions_id") or ca.get("car_action_id")
+            if ca_rid and not ca_rid.startswith(("car_actions:", "car_action:")):
+                ca_rid = f"car_actions:{ca_rid}"
+            for action in ca.get("actions", []) or []:
+                a_rid = action.get("resource_id") or action.get("action_id")
+                if a_rid and not a_rid.startswith("action:"):
+                    a_rid = f"action:{a_rid}"
+                if a_rid and _mark_resource_deleted_on_operator(a_rid):
+                    deleted_action_ids.append(a_rid)
+            if ca_rid and _mark_resource_deleted_on_operator(ca_rid):
+                deleted_car_action_ids.append(ca_rid)
+
+    # 2) 处理 plan.car_actions 中可能存在的同车辆记录
+    for ca in plan.get("car_actions", []) or []:
+        if ca.get("vid") != vid:
+            continue
+        ca_rid = ca.get("resource_id") or ca.get("car_actions_id") or ca.get("car_action_id")
+        if ca_rid and not ca_rid.startswith(("car_actions:", "car_action:")):
+            ca_rid = f"car_actions:{ca_rid}"
+        for action in ca.get("actions", []) or []:
+            a_rid = action.get("resource_id") or action.get("action_id")
+            if a_rid and not a_rid.startswith("action:"):
+                a_rid = f"action:{a_rid}"
+            if a_rid and a_rid not in deleted_action_ids and _mark_resource_deleted_on_operator(a_rid):
+                deleted_action_ids.append(a_rid)
+        if ca_rid and ca_rid not in deleted_car_action_ids and _mark_resource_deleted_on_operator(ca_rid):
+            deleted_car_action_ids.append(ca_rid)
+
+    # 3) 更新本地 task_pool：移除该车辆
+    updated_plan = copy.deepcopy(plan)
+    for stage in updated_plan.get("stages", []) or []:
+        team_actions = stage.get("team_actions", {})
+        if isinstance(team_actions, list):
+            for entry in team_actions:
+                if entry.get("car_actions"):
+                    entry["car_actions"] = [c for c in entry["car_actions"] if c.get("vid") != vid]
+                if entry.get("team_actions"):
+                    entry["team_actions"] = [c for c in entry["team_actions"] if c.get("vid") != vid]
+        elif isinstance(team_actions, dict):
+            for key in list(team_actions.keys()):
+                team_actions[key] = [c for c in team_actions[key] if c.get("vid") != vid]
+    updated_plan["car_actions"] = [c for c in updated_plan.get("car_actions", []) if c.get("vid") != vid]
+    updated_plan["vehicle_summary"] = [v for v in updated_plan.get("vehicle_summary", []) if v.get("vid") != vid]
+    updated_plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated_plan["local_dirty"] = True
+    task_pool.set(rid, updated_plan)
+
+    # 4) 同步到数据服务器
+    sync_ok = sync_plan_to_operator(plan_id)
+
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "vid": vid,
+        "deleted_actions": deleted_action_ids,
+        "deleted_car_actions": deleted_car_action_ids,
+        "sync_ok": sync_ok,
+    }
+
+
 

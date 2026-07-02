@@ -38,6 +38,7 @@ from app.services.action_sequence_client import (
     sync_plan_to_operator,
     query_online_vehicles,
     query_online_vehicles_operator,
+    delete_vehicle_operator,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
@@ -329,6 +330,19 @@ async def sync_plan_operator(plan_id: str):
         "action": "sync_to_operator",
         "message": "方案已同步到数据服务器",
     })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/vehicles/{vid}/delete", response_model=ApiResponse)
+async def delete_vehicle_from_plan_operator(plan_id: str, vid: str):
+    """操控端 — 删除方案中指定车辆的行动序列。
+
+    会先把数据服务器上该车辆对应的所有 action / car_action 状态置为 DELETED，
+    再更新本地 plan 并同步到数据服务器。
+    """
+    result = delete_vehicle_operator(plan_id, vid)
+    if not result.get("ok"):
+        return ApiResponse(code=500, message=result.get("error") or "删除失败", data=result)
+    return ApiResponse(data=result)
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
