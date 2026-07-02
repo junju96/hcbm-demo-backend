@@ -1809,11 +1809,42 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
             local_actions = _count_actions(local_plan)
             remote_actions = _count_actions(remote_plan)
 
-            if local_plan and local_actions >= remote_actions:
+            # 额外比较车辆集合：删除整辆车后 actions 数量必然减少，但不能因此回退到远程旧数据。
+            def _collect_vids(p):
+                vids = set()
+                for stage in p.get("stages", []) or []:
+                    team_actions = stage.get("team_actions", {})
+                    if isinstance(team_actions, dict):
+                        for vlist in team_actions.values():
+                            for v in vlist or []:
+                                if isinstance(v, dict) and v.get("vid"):
+                                    vids.add(v["vid"])
+                    elif isinstance(team_actions, list):
+                        for ta in team_actions:
+                            for v in ta.get("car_actions", []) or []:
+                                if isinstance(v, dict) and v.get("vid"):
+                                    vids.add(v["vid"])
+                            for v in ta.get("team_actions", []) or []:
+                                if isinstance(v, dict) and v.get("vid"):
+                                    vids.add(v["vid"])
+                for v in p.get("vehicle_summary", []) or []:
+                    if v.get("vid"):
+                        vids.add(v["vid"])
+                return vids
+
+            local_vids = _collect_vids(local_plan)
+            remote_vids = _collect_vids(remote_plan)
+            vids_equal = local_vids == remote_vids
+
+            if local_plan and not vids_equal:
+                # 车辆集合发生变化（增删车辆），优先使用本地编辑结果
+                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (vids changed: local={sorted(local_vids)}, remote={sorted(remote_vids)}), plan_id={plan_id}")
+                plan = local_plan
+            elif local_plan and local_actions >= remote_actions:
                 print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
                 plan = local_plan
             else:
-                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}), plan_id={plan_id}")
+                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}, vids_equal={vids_equal}), plan_id={plan_id}")
                 plan = remote_plan
                 task_pool.set(rid, plan)
     else:
