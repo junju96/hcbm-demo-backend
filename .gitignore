@@ -14,6 +14,8 @@ venv/
 
 # Logs
 *.log
+serverlog.txt
+*.swp
 
 # Archives
 *.zip
