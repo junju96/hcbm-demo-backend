@@ -154,7 +154,7 @@ def _normalize_plan_field_names(obj: Any) -> Any:
     return normalized
 
 
-def query_plans(limit: int = 20) -> List[Dict[str, Any]]:
+def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
     """查询行动方案列表 — 调用数据服务器 POST /resources/query（静默模式，不打印日志）。
     数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
     data = _http_post(
@@ -1810,7 +1810,7 @@ def query_online_vehicles_operator() -> List[Dict[str, Any]]:
 # ==================== 操控席数据服务端接口 ====================
 
 
-def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
+def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
     """向操控席数据服务器查询行动方案列表 — POST /resources/query（静默模式）。
     服务端不可达或为空时回退本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
     data = _http_post_operator(
@@ -1821,13 +1821,11 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
-        ids = [(item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""), item.get("state")) for item in items]
-        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}, ids={ids}")
+        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}")
     elif data is not None and isinstance(data, dict):
         raw_items = data.get("items") or data.get("data") or []
         items = raw_items[:limit]
-        ids = [(item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""), item.get("state")) for item in items]
-        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}, ids={ids}")
+        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
     else:
         print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
 
