@@ -2032,9 +2032,17 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
     if not plan:
         return {"ok": False, "error": "Plan not found in local task_pool"}
 
+    # 统一 vid 格式，支持 "equipment:ZD02" 和 "ZD02" 两种传入形式
+    normalized_vid = vid if vid.startswith("equipment:") else f"equipment:{vid}"
+
     # 1) 收集该车辆在 stages.team_actions 和 plan.car_actions 中的所有 car_action 资源 ID
     car_action_ids: List[str] = []
     seen_ca_ids = set()
+
+    def _match_vid(ca_vid: Any) -> bool:
+        if not ca_vid or not isinstance(ca_vid, str):
+            return False
+        return ca_vid == normalized_vid or ca_vid == vid
 
     for stage in plan.get("stages", []) or []:
         team_actions = stage.get("team_actions", {})
@@ -2048,7 +2056,7 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
                 car_actions_list.extend(vlist or [])
 
         for ca in car_actions_list:
-            if ca.get("vid") != vid:
+            if not _match_vid(ca.get("vid")):
                 continue
             ca_rid = _normalize_car_action_resource_id(ca)
             if ca_rid and ca_rid not in seen_ca_ids:
@@ -2056,7 +2064,7 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
                 seen_ca_ids.add(ca_rid)
 
     for ca in plan.get("car_actions", []) or []:
-        if ca.get("vid") != vid:
+        if not _match_vid(ca.get("vid")):
             continue
         ca_rid = _normalize_car_action_resource_id(ca)
         if ca_rid and ca_rid not in seen_ca_ids:
