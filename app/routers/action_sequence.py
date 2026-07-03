@@ -59,7 +59,7 @@ class ActionParamUpdateRequest(BaseModel):
 
 
 @router.get("/action-sequences/plans", response_model=ApiResponse)
-async def list_plans(limit: int = 20):
+async def list_plans(limit: int = 200):
     """获取行动方案列表"""
     items = query_plans(limit=limit)
     print(f"[AS-API] list_plans returned {len(items)} items, first ids={[p.get('plan_id') for p in items[:3]]}")
@@ -230,7 +230,7 @@ async def list_online_vehicles_operator():
 
 
 @router.get("/action-sequences/operator/plans", response_model=ApiResponse)
-async def list_plans_operator(limit: int = 20):
+async def list_plans_operator(limit: int = 200):
     """操控端 — 从操控席数据服务端获取行动方案列表"""
     items = query_plans_operator(limit=limit)
     return ApiResponse(data={"items": items, "total": len(items)})
