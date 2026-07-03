@@ -1983,28 +1983,45 @@ def sync_plan_to_operator(plan_id: str) -> bool:
         return False
 
 
-def _mark_resource_deleted_on_operator(resource_id: str) -> bool:
-    """调用数据服务器 PATCH 接口，将指定资源 raw_payload.state 置为 DELETED。"""
+def _cascade_delete_resource_on_operator(resource_id: str) -> Optional[Dict[str, Any]]:
+    """调用数据服务器级联删除接口，将目标资源及其子资源标记为 DELETED。
+
+    接口：POST /api/v1/task_pool/resources/{resource_id}/delete，body {"cascade": true}
+    返回 None 表示调用失败。
+    """
     if not resource_id:
-        return False
+        return None
     try:
-        resp = _http_patch_operator(
-            f"/api/v1/task_pool/resources/{resource_id}",
-            {"payload": {"raw_payload": {"state": "DELETED"}}},
+        resp = _http_post_operator(
+            f"/api/v1/task_pool/resources/{resource_id}/delete",
+            {"cascade": True},
             silent=True,
         )
-        return resp is not None and isinstance(resp, dict)
+        if resp is not None and isinstance(resp, dict):
+            return resp
+        print(f"[DELETE-VEHICLE] cascade delete {resource_id} returned non-dict: {resp}")
+        return None
     except Exception as e:
-        print(f"[DELETE-VEHICLE] mark {resource_id} deleted failed: {e}")
-        return False
+        print(f"[DELETE-VEHICLE] cascade delete {resource_id} failed: {e}")
+        return None
+
+
+def _normalize_car_action_resource_id(ca: Dict[str, Any]) -> Optional[str]:
+    """从 car_action 对象中提取并规范化资源 ID。"""
+    ca_rid = ca.get("resource_id") or ca.get("car_actions_id") or ca.get("car_action_id")
+    if not ca_rid:
+        return None
+    if not ca_rid.startswith(("car_actions:", "car_action:")):
+        ca_rid = f"car_actions:{ca_rid}"
+    return ca_rid
 
 
 def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
     """删除操控席方案中指定车辆的行动序列。
 
     逻辑：
-    1. 从本地 plan 找到该车辆对应的所有 car_actions 及下属 actions；
-    2. 依次调用数据服务器 PATCH 把 action / car_action 的 state 置为 DELETED；
+    1. 从本地 plan 找到该车辆对应的所有 car_actions；
+    2. 调用数据服务器级联删除接口（cascade=true）删除 car_action 及其子 action；
     3. 更新本地 task_pool，移除该车辆；
     4. 调用 sync_plan_to_operator 把更新后的 plan 同步到数据服务器。
     """
@@ -2015,10 +2032,10 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
     if not plan:
         return {"ok": False, "error": "Plan not found in local task_pool"}
 
-    deleted_action_ids = []
-    deleted_car_action_ids = []
+    # 1) 收集该车辆在 stages.team_actions 和 plan.car_actions 中的所有 car_action 资源 ID
+    car_action_ids: List[str] = []
+    seen_ca_ids = set()
 
-    # 1) 处理 stages.team_actions 中的 car_actions
     for stage in plan.get("stages", []) or []:
         team_actions = stage.get("team_actions", {})
         car_actions_list = []
@@ -2033,33 +2050,31 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
         for ca in car_actions_list:
             if ca.get("vid") != vid:
                 continue
-            ca_rid = ca.get("resource_id") or ca.get("car_actions_id") or ca.get("car_action_id")
-            if ca_rid and not ca_rid.startswith(("car_actions:", "car_action:")):
-                ca_rid = f"car_actions:{ca_rid}"
-            for action in ca.get("actions", []) or []:
-                a_rid = action.get("resource_id") or action.get("action_id")
-                if a_rid and not a_rid.startswith("action:"):
-                    a_rid = f"action:{a_rid}"
-                if a_rid and _mark_resource_deleted_on_operator(a_rid):
-                    deleted_action_ids.append(a_rid)
-            if ca_rid and _mark_resource_deleted_on_operator(ca_rid):
-                deleted_car_action_ids.append(ca_rid)
+            ca_rid = _normalize_car_action_resource_id(ca)
+            if ca_rid and ca_rid not in seen_ca_ids:
+                car_action_ids.append(ca_rid)
+                seen_ca_ids.add(ca_rid)
 
-    # 2) 处理 plan.car_actions 中可能存在的同车辆记录
     for ca in plan.get("car_actions", []) or []:
         if ca.get("vid") != vid:
             continue
-        ca_rid = ca.get("resource_id") or ca.get("car_actions_id") or ca.get("car_action_id")
-        if ca_rid and not ca_rid.startswith(("car_actions:", "car_action:")):
-            ca_rid = f"car_actions:{ca_rid}"
-        for action in ca.get("actions", []) or []:
-            a_rid = action.get("resource_id") or action.get("action_id")
-            if a_rid and not a_rid.startswith("action:"):
-                a_rid = f"action:{a_rid}"
-            if a_rid and a_rid not in deleted_action_ids and _mark_resource_deleted_on_operator(a_rid):
-                deleted_action_ids.append(a_rid)
-        if ca_rid and ca_rid not in deleted_car_action_ids and _mark_resource_deleted_on_operator(ca_rid):
+        ca_rid = _normalize_car_action_resource_id(ca)
+        if ca_rid and ca_rid not in seen_ca_ids:
+            car_action_ids.append(ca_rid)
+            seen_ca_ids.add(ca_rid)
+
+    # 2) 级联删除每个 car_action
+    deleted_action_ids = []
+    deleted_car_action_ids = []
+    for ca_rid in car_action_ids:
+        result = _cascade_delete_resource_on_operator(ca_rid)
+        if result:
             deleted_car_action_ids.append(ca_rid)
+            for deleted_id in result.get("deleted_resource_ids", []) or []:
+                if deleted_id.startswith("action:") and deleted_id not in deleted_action_ids:
+                    deleted_action_ids.append(deleted_id)
+        else:
+            print(f"[DELETE-VEHICLE] failed to cascade delete {ca_rid}, skip")
 
     # 3) 更新本地 task_pool：移除该车辆
     updated_plan = copy.deepcopy(plan)
