@@ -515,6 +515,7 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
                 if not inferred and _is_generic_action_id(action_id):
                     inferred = _infer_action_type_from_param(a.get("param"))
                 at = inferred or at
+            print(f"[AS-DEBUG-action-type] action_id={action_id}, raw_type={a.get('action_type')!r}, car_action_type={car_action_type!r}, inferred={at!r}, param_keys={list(a.get('param', {}).keys()) if isinstance(a.get('param'), dict) else []}")
             normalized_actions.append(dict(a, action_type=at))
         actions = normalized_actions
 
