@@ -505,17 +505,17 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         car_action_type = ca.get("action_type", "")
         # 把 car_actions 的 action_type 注入到每个 action 中；
         # 若 car_action_type 为空或为 Unknown，则依次尝试：
-        # 1) action 自身 action_id 推断；2) action param 结构推断。
+        # 1) 非通用 action_id 语义推断；2) param 结构推断。
         normalized_actions = []
         for a in actions:
             at = car_action_type or a.get("action_type", "")
             action_id = a.get("action_id", "")
             if not at or at.lower() in ("unknown", "unknown_action"):
-                inferred = _infer_action_type_from_action_id(action_id)
-                if not inferred and _is_generic_action_id(action_id):
+                if _is_generic_action_id(action_id):
                     inferred = _infer_action_type_from_param(a.get("param"))
+                else:
+                    inferred = _infer_action_type_from_action_id(action_id)
                 at = inferred or at
-            print(f"[AS-DEBUG-action-type] action_id={action_id}, raw_type={a.get('action_type')!r}, car_action_type={car_action_type!r}, inferred={at!r}, param_keys={list(a.get('param', {}).keys()) if isinstance(a.get('param'), dict) else []}")
             normalized_actions.append(dict(a, action_type=at))
         actions = normalized_actions
 
