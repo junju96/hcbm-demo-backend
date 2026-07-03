@@ -1821,11 +1821,13 @@ def query_plans_operator(limit: int = 20) -> List[Dict[str, Any]]:
     items = []
     if data is not None and isinstance(data, list):
         items = data[:limit]
-        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}")
+        ids = [(item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""), item.get("state")) for item in items]
+        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}, ids={ids}")
     elif data is not None and isinstance(data, dict):
         raw_items = data.get("items") or data.get("data") or []
         items = raw_items[:limit]
-        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
+        ids = [(item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""), item.get("state")) for item in items]
+        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}, ids={ids}")
     else:
         print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
 
