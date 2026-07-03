@@ -154,6 +154,15 @@ def _normalize_plan_field_names(obj: Any) -> Any:
     return normalized
 
 
+def _plan_sort_key(item: Dict[str, Any]) -> Tuple[int, str]:
+    """按 plan_id 末尾数字升序排序；无数字的排最后，并按原字符串稳定排序。"""
+    plan_id = item.get("plan_id") or item.get("resource_id", "").replace("plan:", "") or ""
+    match = re.search(r"(\d+)$", plan_id)
+    if match:
+        return (0, int(match.group(1)))
+    return (1, plan_id)
+
+
 def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
     """查询行动方案列表 — 调用数据服务器 POST /resources/query（静默模式，不打印日志）。
     数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
@@ -186,6 +195,8 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
             # 仅合并本地 fake 调测方案，不要把真实 plan 的本地缓存插入列表
             if local_id == FAKE_PLAN_ID and local_id not in server_ids:
                 items.insert(0, local_item)
+
+    items.sort(key=_plan_sort_key)
 
     result = []
     for idx, item in enumerate(items):
@@ -1846,6 +1857,8 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
             # 仅合并本地 fake 调测方案，不要把真实 plan 的本地缓存插入列表
             if local_id == FAKE_PLAN_ID and local_id not in server_ids:
                 items.insert(0, local_item)
+
+    items.sort(key=_plan_sort_key)
 
     result = []
     for item in items:
