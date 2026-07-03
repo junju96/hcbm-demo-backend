@@ -2039,48 +2039,6 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
     return task_pool.get(rid)
 
 
-def _normalize_action_type_for_ingestion(action_type: str) -> str:
-    """把前端/内部使用的 action_type 映射为数据服务器可识别的规范名称。
-
-    参考 `装备行动序列数据结构 - 大模型侧定义`：
-    - Search-And-Shoot -> search-and-shoot
-    """
-    if not action_type:
-        return action_type
-    mapping = {
-        "Search-And-Shoot": "search-and-shoot",
-    }
-    return mapping.get(action_type, action_type)
-
-
-def _normalize_plan_action_types_for_ingestion(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """同步到数据服务器前，将 plan 中所有 action 的 action_type 规范化为服务器可识别的值。"""
-    plan = copy.deepcopy(plan)
-    for stage in plan.get("stages", []) or []:
-        team_actions = stage.get("team_actions", {})
-        car_actions_list = []
-        if isinstance(team_actions, list):
-            for entry in team_actions:
-                car_actions_list.extend(entry.get("car_actions") or [])
-                car_actions_list.extend(entry.get("team_actions") or [])
-        elif isinstance(team_actions, dict):
-            for vlist in team_actions.values():
-                car_actions_list.extend(vlist or [])
-        for ca in car_actions_list:
-            if ca.get("action_type"):
-                ca["action_type"] = _normalize_action_type_for_ingestion(ca["action_type"])
-            for a in ca.get("actions", []) or []:
-                if a.get("action_type"):
-                    a["action_type"] = _normalize_action_type_for_ingestion(a.get("action_type"))
-    for ca in plan.get("car_actions", []) or []:
-        if ca.get("action_type"):
-            ca["action_type"] = _normalize_action_type_for_ingestion(ca["action_type"])
-        for a in ca.get("actions", []) or []:
-            if a.get("action_type"):
-                a["action_type"] = _normalize_action_type_for_ingestion(a.get("action_type"))
-    return plan
-
-
 def sync_plan_to_operator(plan_id: str) -> bool:
     """把本地 task_pool 中的 plan 通过 ingestion/import 同步到操控席数据服务器。
 
@@ -2094,17 +2052,16 @@ def sync_plan_to_operator(plan_id: str) -> bool:
     if not plan:
         return False
     try:
-        ingest_plan = _normalize_plan_action_types_for_ingestion(plan)
         payload = {
             "resource_id": rid,
             "task_type": "PLAN",
-            "plan_id": ingest_plan.get("plan_id") or rid.replace("plan:", ""),
-            "title": ingest_plan.get("title", ""),
-            "description": ingest_plan.get("description", ""),
-            "state": ingest_plan.get("state") or "DRAFT",
-            "teams": ingest_plan.get("teams", []),
-            "targets": ingest_plan.get("targets", []),
-            "stages": ingest_plan.get("stages", []),
+            "plan_id": plan.get("plan_id") or rid.replace("plan:", ""),
+            "title": plan.get("title", ""),
+            "description": plan.get("description", ""),
+            "state": plan.get("state") or "DRAFT",
+            "teams": plan.get("teams", []),
+            "targets": plan.get("targets", []),
+            "stages": plan.get("stages", []),
         }
         result = _http_post_operator(
             "/api/v1/task_pool/ingestion/import",
