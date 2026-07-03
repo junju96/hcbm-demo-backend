@@ -67,7 +67,7 @@ def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) ->
         return None
 
 
-def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False, timeout: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
@@ -75,7 +75,7 @@ def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False
     try:
         if not silent:
             print(f"[DS-OUT] POST {url} | body={body_summary}")
-        resp = requests.post(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
         if not silent:
             print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -277,7 +277,7 @@ def _http_get_resource_pool(path: str, params: Optional[Dict] = None, silent: bo
         return None
 
 
-def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: bool = False, timeout: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
     """向操控席数据服务器发送 POST 请求"""
     if not HAS_REQUESTS:
         return None
@@ -286,7 +286,7 @@ def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: boo
     try:
         if not silent:
             print(f"[OP-DS-OUT] POST {url} | body={body_summary}")
-        resp = requests.post(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
         if not silent:
             print(f"[OP-DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()

@@ -170,6 +170,7 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
         silent=True,
+        timeout=(1, 30),
     )
     items = []
     if data is not None and isinstance(data, list):
@@ -1828,6 +1829,7 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
         silent=True,
+        timeout=(1, 30),
     )
     items = []
     if data is not None and isinstance(data, list):
