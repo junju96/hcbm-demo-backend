@@ -334,6 +334,112 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
     return mapping.get(aid) or aid
 
 
+def _is_generic_action_id(action_id: str) -> bool:
+    """判断 action_id 是否为数据服务器分配的通用编号（如 action-0063）。"""
+    if not action_id:
+        return True
+    aid = str(action_id).strip().lower()
+    # 语义化 action_id 通常包含 '-' 且以动作类型命名；通用编号形如 action-{数字}
+    if aid.startswith("action-") and len(aid) > len("action-") and aid[len("action-"):].isdigit():
+        return True
+    return False
+
+
+def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
+    """当 action_type 为空且 action_id 为通用编号时，根据 param 结构推断 action_type。"""
+    if not param or not isinstance(param, dict):
+        return ""
+    p = param
+
+    # 激光照射：参数里有 ene/freq/meat 等字段
+    if any(k in p for k in ("ene", "freq", "meat")):
+        return "laser-illumination"
+
+    # 空中侦察：空地车特有字段
+    if "points1" in p or "points2" in p or "points3" in p:
+        return "air-recon"
+
+    # 强声/强光拒止：有 area 且 attr 字段
+    if "area" in p and "attr" in p:
+        if "thr" in p and p.get("dam") == 0:
+            return "sound-expel" if p.get("ammo") == 0 else "light-expel"
+
+    # 电磁侦察 / 电磁干扰
+    if "frequency" in p:
+        if "protect" in p or p.get("sort") == 1:
+            return "em-interference"
+        return "em-recon"
+
+    # 载荷静默
+    if set(p.keys()) <= {"time"}:
+        return "payload-silent"
+
+    # 设置返航点：空参数
+    if not p:
+        return "set-return-point"
+
+    # 开启返航：依赖字段或空参数（与设置返航点区分度低，优先按名称推断）
+
+    # 打击类：points 数组
+    if "points" in p and isinstance(p["points"], list) and len(p["points"]) > 0:
+        first = p["points"][0]
+        if isinstance(first, dict):
+            # 40炮：tart=6, attr=1, thr=80, dam=1, blk=2, figt=2, sug=3
+            if first.get("tart") == 6 and first.get("attr") == 1:
+                # 40炮与机枪、火箭弹、巡飞弹参数结构相似，按 sort/num 区分度低
+                # 但可通过 ammo_type 区分：40炮 ammo_type=2，机枪 ammo_type=1
+                ammo_type = first.get("ammo_type")
+                if ammo_type == 2:
+                    return "40mm-gun-launch"
+                if ammo_type == 1:
+                    return "7.62mm-gun-shot"
+                # 无 ammo_type 时无法精确区分，保留空字符串让前端兜底
+                return ""
+            # 红箭13导弹：通常有 tart/attr 但 ammo_type 不同
+            if "ammo_type" in first:
+                return "at-missile-launch"
+            # 火箭弹：通常 points 里有 r 字段
+            if "r" in first or p.get("type") == 2:
+                return "rocket-launch"
+            # 巡飞弹：通常有 loiter 相关字段
+            if "loiter" in p or p.get("type") == 3:
+                return "loitering-munition-launch"
+
+    # 光电侦察：area + direct
+    if "area" in p and "direct" in p:
+        return "lens-recon"
+
+    # 侦察打击：area 但没有 direct（与 lens-recon 区分）
+    if "area" in p:
+        return "search-and-shoot"
+
+    # 自主机动：points + limited_speed
+    if "points" in p and "limited_speed" in p:
+        return "auto-move"
+
+    # 跟随机动：x, y, distance
+    if "distance" in p and "x" in p and "y" in p:
+        return "follow-move"
+
+    # 编队机动：points + formation_mode
+    if "points" in p and "formation_mode" in p:
+        return "formation-move"
+
+    # 静默值守：time
+    if "time" in p and len(p) == 1:
+        return "silent-guard"
+
+    # 人工任务：type 单一字段
+    if "type" in p and len(p) == 1:
+        return "manual-task"
+
+    # 姿态调整：pose
+    if "pose" in p:
+        return "pose-adjust"
+
+    return ""
+
+
 def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     """根据 action_type 推断车辆类型，用于 plan.teams 中缺少 resource_type 时的兜底。
 
@@ -398,12 +504,17 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         actions = ca.get("actions", [])
         car_action_type = ca.get("action_type", "")
         # 把 car_actions 的 action_type 注入到每个 action 中；
-        # 若 car_action_type 为空或为 Unknown，则尝试从 action 自身 action_id 推断。
+        # 若 car_action_type 为空或为 Unknown，则依次尝试：
+        # 1) action 自身 action_id 推断；2) action param 结构推断。
         normalized_actions = []
         for a in actions:
             at = car_action_type or a.get("action_type", "")
+            action_id = a.get("action_id", "")
             if not at or at.lower() in ("unknown", "unknown_action"):
-                at = _infer_action_type_from_action_id(a.get("action_id", ""))
+                inferred = _infer_action_type_from_action_id(action_id)
+                if not inferred and _is_generic_action_id(action_id):
+                    inferred = _infer_action_type_from_param(a.get("param"))
+                at = inferred or at
             normalized_actions.append(dict(a, action_type=at))
         actions = normalized_actions
 
