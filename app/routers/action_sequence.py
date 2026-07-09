@@ -35,13 +35,17 @@ from app.services.action_sequence_client import (
     import_plan_to_operator,
     create_operator_plan,
     update_operator_plan_locally,
+    update_plan,
     sync_plan_to_operator,
     query_online_vehicles,
     query_online_vehicles_operator,
     delete_vehicle_operator,
+    delete_vehicle,
+    dispatch_plan_forward,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
+from app.services import vehicle_control_client
 
 router = APIRouter()
 
@@ -54,11 +58,63 @@ class DispatchRequest(BaseModel):
     vehicle_vid: Optional[str] = None
 
 
+class DispatchForwardRequest(BaseModel):
+    target_ips: List[str]
+    timeout_seconds: Optional[int] = 30
+
+
 class ActionParamUpdateRequest(BaseModel):
     param: Dict[str, Any]
 
 
-@router.get("/action-sequences/plans", response_model=ApiResponse)
+class SelectVehicleRequest(BaseModel):
+    vehicle_id: str
+
+
+@router.get("/action-sequences/connected-vehicles", response_model=ApiResponse)
+async def list_connected_vehicles():
+    """获取车辆控制服务当前已连接车辆列表（用于操控席选择车辆）"""
+    items = vehicle_control_client.get_all_vehicle_info()
+    selected = vehicle_control_client.get_selected_vehicle_id()
+    return ApiResponse(data={
+        "items": items,
+        "selected": selected,
+        "total": len(items),
+    })
+
+
+@router.get("/action-sequences/selected-vehicle", response_model=ApiResponse)
+async def get_selected_vehicle():
+    """获取当前已选中的车辆"""
+    selected = vehicle_control_client.get_selected_vehicle_id()
+    info = vehicle_control_client.get_selected_vehicle_info()
+    return ApiResponse(data={
+        "selected": selected,
+        "info": info,
+    })
+
+
+@router.post("/action-sequences/select-vehicle", response_model=ApiResponse)
+async def select_vehicle(body: SelectVehicleRequest):
+    """选中一辆车：刷新缓存、订阅该车辆 zenoh 反馈、记录选中状态"""
+    vehicle_id = body.vehicle_id
+    # 先刷新一次车辆信息，确保车辆当前在线
+    vehicle_control_client.refresh_vehicle_info()
+    info = vehicle_control_client.get_vehicle_info(vehicle_id)
+    if not info:
+        return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
+
+    # 订阅该车辆反馈
+    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
+    if ok:
+        vehicle_control_client.set_selected_vehicle_id(vehicle_id)
+        print(f"[AS-API] selected vehicle: {vehicle_id}, subscribed feedbacks")
+        return ApiResponse(data={
+            "selected": vehicle_id,
+            "info": info,
+            "subscribed": True,
+        })
+    return ApiResponse(code=500, message=f"订阅车辆 {vehicle_id} 反馈失败", data={"selected": vehicle_id})
 async def list_plans(limit: int = 200):
     """获取行动方案列表"""
     items = query_plans(limit=limit)
@@ -186,6 +242,15 @@ async def stop_plan(plan_id: str):
     })
 
 
+@router.post("/action-sequences/plans/{plan_id}/dispatch-forward", response_model=ApiResponse)
+async def dispatch_plan_forward_route(plan_id: str, body: DispatchForwardRequest):
+    """协同席 — 将行动方案通过数据服务器 /ingestion/forward 下发到指定席位。"""
+    result = dispatch_plan_forward(plan_id, body.target_ips, body.timeout_seconds or 30)
+    if not result.get("ok"):
+        return ApiResponse(code=500, message=result.get("error") or "下发失败", data=result)
+    return ApiResponse(data=result)
+
+
 @router.post("/action-sequences/plans/{plan_id}/dispatch", response_model=ApiResponse)
 async def dispatch_plan(plan_id: str, body: DispatchRequest):
     """
@@ -221,6 +286,39 @@ async def dispatch_plan(plan_id: str, body: DispatchRequest):
 
 
 # ========== 操控端行动序列专用接口 ==========
+
+@router.get("/action-sequences/operator/connected-vehicles", response_model=ApiResponse)
+async def list_connected_vehicles_operator():
+    """操控端 — 获取车辆控制服务当前已连接车辆列表"""
+    items = vehicle_control_client.get_all_vehicle_info()
+    selected = vehicle_control_client.get_selected_vehicle_id()
+    return ApiResponse(data={
+        "items": items,
+        "selected": selected,
+        "total": len(items),
+    })
+
+
+@router.post("/action-sequences/operator/select-vehicle", response_model=ApiResponse)
+async def select_vehicle_operator(body: SelectVehicleRequest):
+    """操控端 — 选中一辆车并订阅 zenoh 反馈"""
+    vehicle_id = body.vehicle_id
+    vehicle_control_client.refresh_vehicle_info()
+    info = vehicle_control_client.get_vehicle_info(vehicle_id)
+    if not info:
+        return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
+
+    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
+    if ok:
+        vehicle_control_client.set_selected_vehicle_id(vehicle_id)
+        print(f"[AS-API-OP] selected vehicle: {vehicle_id}, subscribed feedbacks")
+        return ApiResponse(data={
+            "selected": vehicle_id,
+            "info": info,
+            "subscribed": True,
+        })
+    return ApiResponse(code=500, message=f"订阅车辆 {vehicle_id} 反馈失败", data={"selected": vehicle_id})
+
 
 @router.get("/action-sequences/operator/vehicles", response_model=ApiResponse)
 async def list_online_vehicles_operator():
@@ -310,6 +408,28 @@ async def create_plan_operator(plan: Dict[str, Any]):
     })
 
 
+@router.patch("/action-sequences/plans/{plan_id}", response_model=ApiResponse)
+async def patch_plan(plan_id: str, body: Dict[str, Any]):
+    """协同席 — 仅更新本地 task_pool 中的方案，不同步到数据服务器"""
+    saved = update_plan(plan_id, body)
+    if not saved:
+        return ApiResponse(code=404, message="Plan not found", data=None)
+    return ApiResponse(data=saved)
+
+
+@router.post("/action-sequences/plans/{plan_id}/vehicles/{vid}/delete", response_model=ApiResponse)
+async def delete_vehicle_from_plan(plan_id: str, vid: str):
+    """协同席 — 删除方案中指定车辆的行动序列。
+
+    会先把数据服务器上该车辆对应的所有 action / car_action 状态置为 DELETED，
+    再更新本地 plan 并同步到数据服务器。
+    """
+    result = delete_vehicle(plan_id, vid)
+    if not result.get("ok"):
+        return ApiResponse(code=500, message=result.get("error") or "删除失败", data=result)
+    return ApiResponse(data=result)
+
+
 @router.patch("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
 async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     """操控端 — 仅更新本地 task_pool 中的方案，不同步到数据服务器"""
@@ -317,19 +437,6 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     if not saved:
         return ApiResponse(code=404, message="Plan not found", data=None)
     return ApiResponse(data=saved)
-
-
-@router.post("/action-sequences/operator/plans/{plan_id}/sync", response_model=ApiResponse)
-async def sync_plan_operator(plan_id: str):
-    """操控端 — 把本地 task_pool 中的 plan 同步到数据服务器"""
-    ok = sync_plan_to_operator(plan_id)
-    if not ok:
-        return ApiResponse(code=500, message="同步到数据服务器失败", data=None)
-    return ApiResponse(data={
-        "plan_id": plan_id,
-        "action": "sync_to_operator",
-        "message": "方案已同步到数据服务器",
-    })
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/vehicles/{vid}/delete", response_model=ApiResponse)
@@ -343,6 +450,19 @@ async def delete_vehicle_from_plan_operator(plan_id: str, vid: str):
     if not result.get("ok"):
         return ApiResponse(code=500, message=result.get("error") or "删除失败", data=result)
     return ApiResponse(data=result)
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/sync", response_model=ApiResponse)
+async def sync_plan_operator(plan_id: str):
+    """操控端 — 把本地 task_pool 中的 plan 同步到数据服务器"""
+    ok = sync_plan_to_operator(plan_id)
+    if not ok:
+        return ApiResponse(code=500, message="同步到数据服务器失败", data=None)
+    return ApiResponse(data={
+        "plan_id": plan_id,
+        "action": "sync_to_operator",
+        "message": "方案已同步到数据服务器",
+    })
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)

@@ -21,9 +21,11 @@ from app.services.data_server_client import (
     _http_get, _http_post, _http_patch,
     _http_get_operator, _http_post_operator, _http_patch_operator,
     _http_get_resource_pool,
+    forward_resources_to_targets,
 )
 from app.services.task_pool import task_pool
 from app.services import zenoh_client
+from app.services import vehicle_control_client
 
 
 def _infer_resource_type_from_vid(vid: str) -> str:
@@ -66,11 +68,15 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
       - 数据服务器标准 /simple: team_actions 为 list[{"team_id": "...", "car_actions": [...]}]
       - 旧真实服务器: team_actions 为 list[{"team_id": "...", "team_actions": [...]}]
       - 旧 Mock 数据: team_actions 为 dict{"team_id": [...]}
+    当 plan.stages[].team_actions 中 actions 为空（数据服务器 /simple 投影丢失）时，
+    尝试按 plan_id + vid 从数据服务器查询 CAR_ACTIONS 资源补全。
     """
     plan_id = plan.get("plan_id", "")
     stages = plan.get("stages", [])
     results: List[Dict[str, Any]] = []
 
+    # 先按 stages.team_actions 收集，同时记录需要补全的 (stage_id, vid)
+    missing_queries = []
     for stage in stages:
         stage_id = stage.get("stage_id", "")
         stage_seq = stage.get("stage_seq", 0)
@@ -105,6 +111,9 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                     continue
                 vid = vehicle.get("vid", "")
                 actions = vehicle.get("actions", [])
+                # 如果该 vehicle 的 actions 为空，标记后续从 CAR_ACTIONS 补全
+                if vid and not actions:
+                    missing_queries.append((stage_id, stage_seq, stage_title, team_id, vid))
                 ca_id = f"ca:{plan_id}:{stage_id}:{vid}"
                 results.append({
                     "car_actions_id": ca_id,
@@ -118,6 +127,68 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "state": vehicle.get("state") or "SCHEDULED",
                     "action_type": vehicle.get("action_type", ""),
                 })
+
+    # 按 plan_id + vid 查询 CAR_ACTIONS / ACTION 资源补全 actions
+    if missing_queries:
+        try:
+            print(f"[AS-DEBUG] _build_car_actions_from_plan try to query CAR_ACTIONS for plan_id={plan_id}, missing_vids={[q[4] for q in missing_queries]}")
+            car_actions_data = _http_post(
+                "/api/v1/task_pool/resources/query",
+                {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
+                silent=True,
+                timeout=(1, 5),
+            )
+            print(f"[AS-DEBUG] CAR_ACTIONS query returned type={type(car_actions_data)}, len={len(car_actions_data) if isinstance(car_actions_data, list) else 'N/A'}")
+            if isinstance(car_actions_data, list):
+                # 先收集每个 vid 下 action_ids 最长的 CAR_ACTIONS，以及 actions 非空的最长子集
+                vid_to_action_ids = {}
+                vid_to_best_actions = {}
+                for ca in car_actions_data:
+                    ca_vid = ca.get("vid", "")
+                    ca_actions = ca.get("actions", [])
+                    ca_action_ids = ca.get("action_ids", [])
+                    print(f"[AS-DEBUG] CAR_ACTIONS item vid={ca_vid}, actions_len={len(ca_actions)}, action_ids_len={len(ca_action_ids)}")
+                    if not ca_vid:
+                        continue
+                    current_ids = vid_to_action_ids.get(ca_vid, [])
+                    if len(ca_action_ids) > len(current_ids):
+                        vid_to_action_ids[ca_vid] = ca_action_ids
+                    if ca_actions:
+                        current = vid_to_best_actions.get(ca_vid)
+                        if current is None or len(ca_actions) > len(current):
+                            vid_to_best_actions[ca_vid] = ca_actions
+
+                # 对 actions 为空但 action_ids 非空的 vid，批量查询 ACTION 资源补全
+                vids_need_action_query = [
+                    vid for vid in vid_to_action_ids
+                    if (not vid_to_best_actions.get(vid)) and vid_to_action_ids.get(vid)
+                ]
+                print(f"[AS-DEBUG] vids_need_action_query={vids_need_action_query}")
+                if vids_need_action_query:
+                    action_resources = _http_post(
+                        "/api/v1/task_pool/resources/query",
+                        {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
+                        silent=True,
+                        timeout=(1, 10),
+                    )
+                    print(f"[AS-DEBUG] ACTION query returned type={type(action_resources)}, len={len(action_resources) if isinstance(action_resources, list) else 'N/A'}")
+                    if isinstance(action_resources, list):
+                        vid_to_action_list = {}
+                        for a in action_resources:
+                            a_vid = a.get("vid", "")
+                            if a_vid in vids_need_action_query:
+                                vid_to_action_list.setdefault(a_vid, []).append(a)
+                        for vid, actions in vid_to_action_list.items():
+                            actions.sort(key=lambda x: x.get("action_seq") or 0)
+                            vid_to_best_actions[vid] = actions
+
+                for item in results:
+                    if item.get("vid") in vid_to_best_actions and not item.get("actions"):
+                        item["actions"] = copy.deepcopy(vid_to_best_actions[item["vid"]])
+                        print(f"[AS-DEBUG] filled actions for vid={item.get('vid')} from CAR_ACTIONS/ACTION, len={len(item['actions'])}")
+        except Exception as e:
+            print(f"[AS-DEBUG] query CAR_ACTIONS failed: {e}")
+            pass
 
     # 按 stage_seq -> vid 排序
     results.sort(key=lambda x: (x["stage_seq"], x["vid"]))
@@ -276,11 +347,15 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
 
             local_actions = _count_actions(local_plan)
             remote_actions = _count_actions(plan)
-            if local_plan and local_actions >= remote_actions:
-                print(f"[AS-DEBUG] get_plan_detail use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
+            # 如果本地 task_pool 中有该 plan，且本地 actions 不为 0，优先使用本地；
+            # 否则尝试远程（即使远程 /simple 接口 actions 看起来更多，也可能因投影丢失而不完整，
+            # 后续 _build_car_actions_from_plan 会通过 CAR_ACTIONS 资源补全）。
+            if local_plan and local_actions > 0:
+                print(f"[AS-DEBUG] get_plan_detail use local task_pool (actions={local_actions} > 0), plan_id={plan_id}")
                 plan = local_plan
             else:
-                print(f"[AS-DEBUG] get_plan_detail use remote (remote_actions={remote_actions} > local={local_actions}), plan_id={plan_id}")
+                print(f"[AS-DEBUG] get_plan_detail use remote (remote_actions={remote_actions}, local_actions={local_actions}), plan_id={plan_id}")
+                plan = _merge_plan_keep_local_params(local_plan, plan)
 
         # 同步缓存到本地 task_pool，方便后续 PATCH 更新
         task_pool.set(rid, plan)
@@ -308,13 +383,109 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _parse_mission_strategy(param: Dict[str, Any]) -> int:
+    """从 action.param 中解析断连策略，映射为 MissionService 协议值。
+
+    协调卡协议：0=停车；1=一键返航；2=继续任务。
+    前端保存时使用同样的数字语义（continue:2, stop:0, return:1），
+    因此 param.disconnect_strategy 若为合法数字可直接使用。
+    """
+    raw = param.get("disconnect_strategy") if isinstance(param, dict) else None
+    if isinstance(raw, int) and raw in (0, 1, 2):
+        return raw
+    if isinstance(raw, str):
+        if raw.isdigit() and int(raw) in (0, 1, 2):
+            return int(raw)
+        mapping = {"stop": 0, "return": 1, "continue": 2}
+        if raw in mapping:
+            return mapping[raw]
+    return 2  # 默认继续任务
+
+
+def _parse_mission_start_end(param: Dict[str, Any], default_start: str, default_end: str) -> Tuple[str, str]:
+    """从 action.param 中解析开始时间和结束时间。
+
+    仅在 enable_start_time 为真、start_time 有效且 mission_duration 不为零时，
+    才返回有效的时间字符串；否则返回空字符串，build_mission_data 中会跳过
+    start/end 字段，避免下发默认值。
+
+    时间格式：前端保存为 ISO 格式或 "YYYY/MM/DD HH:mm"，统一输出为
+    "YYYY-MM-DD HH:MM:SS"。
+    """
+    if not isinstance(param, dict):
+        return "", ""
+
+    enable = param.get("enable_start_time", False)
+    start_time = param.get("start_time", "")
+    duration = param.get("mission_duration", "") or "00:00:00"
+
+    if not enable or not start_time:
+        return "", ""
+
+    # 尝试解析开始时间
+    dt = None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y/%m/%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(str(start_time), fmt)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return "", ""
+
+    # 解析 mission_duration "HH:MM:SS"
+    try:
+        parts = str(duration).split(":")
+        if len(parts) == 3:
+            hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
+        elif len(parts) == 2:
+            hours, minutes, seconds = 0, int(parts[0]), int(parts[1])
+        else:
+            hours = minutes = seconds = 0
+    except (ValueError, TypeError):
+        hours = minutes = seconds = 0
+
+    # 未设置任务时长时不下发 start/end
+    if hours == 0 and minutes == 0 and seconds == 0:
+        return "", ""
+
+    end_dt = dt + timedelta(hours=hours, minutes=minutes, seconds=seconds)
+    return dt.strftime("%Y-%m-%d %H:%M:%S"), end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# 标准 action_type 集合，用于判断一个字符串是否为已归一化的标准类型
+_STANDARD_ACTION_TYPES = {
+    "auto-move", "follow-move", "silent-guard", "set-return-point", "return-to-base",
+    "formation-move", "manual-task", "pose-adjust", "air-recon", "lens-recon",
+    "search-and-shoot", "recon-strike", "40mm-gun-launch", "at-missile-launch",
+    "gun-shot", "7.62mm-gun-shot", "rocket-launch", "loitering-munition-launch",
+    "laser-illumination", "sound-expel", "acoustic-deterrence", "light-expel",
+    "light-deterrence", "em-recon", "electronic-recon", "em-interference",
+    "electronic-jamming", "payload-silent",
+}
+
+
+def _is_standard_action_type(action_type: str) -> bool:
+    """判断 action_type 是否已为标准命名（小写连字符形式）。"""
+    if not action_type:
+        return False
+    return action_type.strip().lower() in _STANDARD_ACTION_TYPES
+
+
 def _infer_action_type_from_action_id(action_id: str) -> str:
-    """当 action_type 为空或 Unknown 时，根据 action_id 推断标准 action_type。"""
+    """当 action_type 为空或 Unknown 时，根据 action_id 推断标准 action_type。
+
+    兼容两种 id 风格：
+      - 标准语义化 id（如 auto-move / return-to-base）
+      - 项目实际数据服务器 id 前缀（如 CH_RETURN / FS_LENS / RS_40MM）
+    无法识别时返回空字符串，便于后续按 name/param 继续推断。
+    """
     aid = (action_id or "").strip().lower().replace("_", "-")
     if not aid:
         return ""
     # 常见 action_id -> action_type 映射
     mapping = {
+        # 标准语义化 id
         "auto-move": "auto-move",
         "follow-move": "follow-move",
         "formation-move": "formation-move",
@@ -328,22 +499,56 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "search-and-shoot": "search-and-shoot",
         "recon-strike": "recon-strike",
         "40mm-gun-launch": "40mm-gun-launch",
+        "at-missile-launch": "at-missile-launch",
         "gun-shot": "gun-shot",
         "7.62mm-gun-shot": "7.62mm-gun-shot",
         "rocket-launch": "rocket-launch",
         "loitering-munition-launch": "loitering-munition-launch",
         "laser-illumination": "laser-illumination",
         "sound-expel": "sound-expel",
-        "acoustic-deterrence": "acoustic-deterrence",
+        "acoustic-deterrence": "sound-expel",
         "light-expel": "light-expel",
-        "light-deterrence": "light-deterrence",
+        "light-deterrence": "light-expel",
         "em-recon": "em-recon",
-        "electronic-recon": "electronic-recon",
+        "electronic-recon": "em-recon",
         "em-interference": "em-interference",
-        "electronic-jamming": "electronic-jamming",
+        "electronic-jamming": "em-interference",
         "payload-silent": "payload-silent",
+        # 项目实际数据服务器 action_id 前缀（底盘类）
+        "ch-move": "auto-move",
+        "ch-follow": "follow-move",
+        "ch-silent": "silent-guard",
+        "ch-set-return": "set-return-point",
+        "ch-return": "return-to-base",
+        "ch-formation": "formation-move",
+        "ch-manual": "manual-task",
+        "ch-pose": "pose-adjust",
+        # 火力车
+        "fs-lens": "lens-recon",
+        "fs-recon-strike": "search-and-shoot",
+        "fs-gun": "7.62mm-gun-shot",
+        "fs-rocket": "rocket-launch",
+        "fs-loiter": "loitering-munition-launch",
+        # 侦打车
+        "rs-lens": "lens-recon",
+        "rs-recon-strike": "search-and-shoot",
+        "rs-40mm": "40mm-gun-launch",
+        "rs-at": "at-missile-launch",
+        "rs-gun": "7.62mm-gun-shot",
+        "rs-laser": "laser-illumination",
+        # 巡逻车
+        "pt-lens": "lens-recon",
+        "pt-recon-strike": "search-and-shoot",
+        "pt-gun": "7.62mm-gun-shot",
+        "pt-acoustic": "sound-expel",
+        "pt-light": "light-expel",
+        # 空地车 / 电磁车
+        "ag-air-recon": "air-recon",
+        "el-recon": "em-recon",
+        "el-jam": "em-interference",
+        "el-silent": "payload-silent",
     }
-    return mapping.get(aid) or aid
+    return mapping.get(aid, "")
 
 
 def _is_generic_action_id(action_id: str) -> bool:
@@ -388,7 +593,7 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
 
     # 设置返航点：空参数
     if not p:
-        return "set-return-point"
+        return ""
 
     # 开启返航：依赖字段或空参数（与设置返航点区分度低，优先按名称推断）
 
@@ -425,17 +630,24 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
     if "area" in p:
         return "search-and-shoot"
 
-    # 自主机动：points + limited_speed
-    if "points" in p and "limited_speed" in p:
+    # 编队机动：points + formation_mode，或路径点带 offsetX/offsetY
+    if "points" in p and "formation_mode" in p:
+        return "formation-move"
+    if (
+        "points" in p
+        and isinstance(p.get("points"), list)
+        and len(p["points"]) > 0
+        and any(isinstance(pt, dict) and ("offsetX" in pt or "offsetY" in pt) for pt in p["points"])
+    ):
+        return "formation-move"
+
+    # 自主机动：points + limited_speed（且不含 formation_mode/offsetX/offsetY，避免与编队机动混淆）
+    if "points" in p and "limited_speed" in p and "formation_mode" not in p:
         return "auto-move"
 
     # 跟随机动：x, y, distance
     if "distance" in p and "x" in p and "y" in p:
         return "follow-move"
-
-    # 编队机动：points + formation_mode
-    if "points" in p and "formation_mode" in p:
-        return "formation-move"
 
     # 静默值守：time
     if "time" in p and len(p) == 1:
@@ -450,6 +662,88 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
         return "pose-adjust"
 
     return ""
+
+
+def _infer_action_type_from_name(name: str) -> str:
+    """当 action_type 为空且 action_id/param 都无法推断时，根据 name 推断。
+
+    同时兼容中文名称与 PascalCase / 小写无连字符的英文名称，方便处理数据服务器
+    中只返回英文 name 或 name 被误写的情况。
+    """
+    if not name:
+        return ""
+    n = str(name).strip()
+    # 先按原始名称精确匹配（中文优先）
+    mapping = {
+        # 中文
+        "自主机动": "auto-move",
+        "跟随机动": "follow-move",
+        "静默值守": "silent-guard",
+        "设置返航点": "set-return-point",
+        "开启返航": "return-to-base",
+        "编队机动": "formation-move",
+        "人工任务": "manual-task",
+        "姿态调整": "pose-adjust",
+        "空中侦察": "air-recon",
+        "光电侦察": "lens-recon",
+        "侦察打击": "search-and-shoot",
+        "巡逻车侦察打击": "search-and-shoot",
+        "40炮打击": "40mm-gun-launch",
+        "红箭13导弹打击": "at-missile-launch",
+        "机枪打击": "7.62mm-gun-shot",
+        "火箭弹打击": "rocket-launch",
+        "巡飞弹打击": "loitering-munition-launch",
+        "激光照射": "laser-illumination",
+        "强声拒止": "sound-expel",
+        "强光拒止": "light-expel",
+        "电磁侦察": "em-recon",
+        "电磁干扰": "em-interference",
+        "载荷静默": "payload-silent",
+    }
+    if n in mapping:
+        return mapping[n]
+    # 英文名称兜底：忽略大小写与连字符
+    n_norm = n.lower().replace("-", "").replace("_", "").replace(".", "")
+    en_mapping = {
+        "automove": "auto-move",
+        "followmove": "follow-move",
+        "silentguard": "silent-guard",
+        "setreturnpoint": "set-return-point",
+        "setreturn": "set-return-point",
+        "returntobase": "return-to-base",
+        "return": "return-to-base",
+        "formationmove": "formation-move",
+        "formation": "formation-move",
+        "manualtask": "manual-task",
+        "manual": "manual-task",
+        "poseadjust": "pose-adjust",
+        "airrecon": "air-recon",
+        "lensrecon": "lens-recon",
+        "searchandshoot": "search-and-shoot",
+        "reconstrike": "search-and-shoot",
+        "40mmgunlaunch": "40mm-gun-launch",
+        "40mmgun": "40mm-gun-launch",
+        "atmissilelaunch": "at-missile-launch",
+        "atmissile": "at-missile-launch",
+        "gunshot": "7.62mm-gun-shot",
+        "762mmgunshot": "7.62mm-gun-shot",
+        "762mmgun": "7.62mm-gun-shot",
+        "rocketlaunch": "rocket-launch",
+        "loiteringmunitionlaunch": "loitering-munition-launch",
+        "loiteringmunition": "loitering-munition-launch",
+        "laserillumination": "laser-illumination",
+        "laser": "laser-illumination",
+        "soundexpel": "sound-expel",
+        "acousticdeterrence": "sound-expel",
+        "lightexpel": "light-expel",
+        "lightdeterrence": "light-expel",
+        "emrecon": "em-recon",
+        "electronicrecon": "em-recon",
+        "eminterference": "em-interference",
+        "electronicjamming": "em-interference",
+        "payloadsilent": "payload-silent",
+    }
+    return en_mapping.get(n_norm, "")
 
 
 def _infer_vehicle_type_from_action_type(action_type: str) -> str:
@@ -516,18 +810,34 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         actions = ca.get("actions", [])
         car_action_type = ca.get("action_type", "")
         # 把 car_actions 的 action_type 注入到每个 action 中；
-        # 若 car_action_type 为空或为 Unknown，则依次尝试：
-        # 1) 非通用 action_id 语义推断；2) param 结构推断。
+        # 若 car_action_type 为空、Unknown 或非标准命名，则依次尝试：
+        # 1) action_id 语义推断；2) param 结构推断；3) name 推断。
+        # 最后用 name 做一次权威校正，修复脏数据中 action_type 与 name 不一致的问题。
         normalized_actions = []
         for a in actions:
             at = car_action_type or a.get("action_type", "")
             action_id = a.get("action_id", "")
-            if not at or at.lower() in ("unknown", "unknown_action"):
+            name = a.get("name", "")
+
+            # 先把非标准 action_type（如 CH_RETURN / Return-To-Base）归一化为标准小写形式
+            if at and at.lower() not in ("unknown", "unknown_action") and not _is_standard_action_type(at):
+                at = _infer_action_type_from_action_id(at) or at.lower()
+
+            if not at or at.lower() in ("unknown", "unknown_action") or not _is_standard_action_type(at):
+                inferred = ""
                 if _is_generic_action_id(action_id):
                     inferred = _infer_action_type_from_param(a.get("param"))
                 else:
                     inferred = _infer_action_type_from_action_id(action_id)
+                if not inferred:
+                    inferred = _infer_action_type_from_name(name)
                 at = inferred or at
+
+            # name 是中文业务名称，最不容易被脏数据污染，用它做最终校正
+            name_inferred = _infer_action_type_from_name(name)
+            if name_inferred:
+                at = name_inferred
+
             normalized_actions.append(dict(a, action_type=at))
         actions = normalized_actions
 
@@ -646,6 +956,16 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
         plan["updated_at"] = datetime.now(timezone.utc).isoformat()
         # 标记本地已被修改，避免后续 get_plan_detail 被数据服务器旧缓存覆盖
         plan["local_dirty"] = True
+        # 同步更新 car_actions / vehicle_summary 中同名 action，避免多份数据不一致
+        for ca in plan.get("car_actions", []) or []:
+            for action in ca.get("actions", []) or []:
+                if action.get("action_id") == action_id:
+                    action["param"] = copy.deepcopy(param)
+        for vs in plan.get("vehicle_summary", []) or []:
+            for stage in vs.get("stages", []) or []:
+                for action in stage.get("actions", []) or []:
+                    if action.get("action_id") == action_id:
+                        action["param"] = copy.deepcopy(param)
         task_pool.set(rid, plan)
         print(f"[AS-DEBUG] updated action param locally: plan_id={plan_id} action_id={action_id}")
     else:
@@ -704,6 +1024,16 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
     if updated:
         plan["updated_at"] = datetime.now(timezone.utc).isoformat()
         plan["local_dirty"] = True
+        # 同步更新 car_actions / vehicle_summary 中同名 action
+        for ca in plan.get("car_actions", []) or []:
+            for action in ca.get("actions", []) or []:
+                if action.get("action_id") == action_id:
+                    action["param"] = copy.deepcopy(param)
+        for vs in plan.get("vehicle_summary", []) or []:
+            for stage in vs.get("stages", []) or []:
+                for action in stage.get("actions", []) or []:
+                    if action.get("action_id") == action_id:
+                        action["param"] = copy.deepcopy(param)
         task_pool.set(rid, plan)
         print(f"[AS-DEBUG] updated operator action param locally: plan_id={plan_id} action_id={action_id}")
     else:
@@ -860,6 +1190,25 @@ def _build_vid_vehicle_type_map(plan: Dict[str, Any]) -> Dict[str, str]:
     for vid in result:
         if not result[vid]:
             result[vid] = _resource_type_to_vehicle_type(_infer_resource_type_from_vid(vid))
+
+    # 4) 兜底：遍历所有 action 所在车辆的 vid，确保每个 vid 都有车型
+    for stage in plan.get("stages", []) or []:
+        team_actions = stage.get("team_actions", {})
+        vehicles = []
+        if isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                if isinstance(vlist, list):
+                    vehicles.extend(vlist)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles.extend(ta.get("car_actions", []) or [])
+                vehicles.extend(ta.get("team_actions", []) or [])
+        for v in vehicles:
+            if isinstance(v, dict) and v.get("vid"):
+                vid = v["vid"]
+                if vid not in result or not result[vid]:
+                    result[vid] = _resource_type_to_vehicle_type(_infer_resource_type_from_vid(vid))
+
     return result
 
 
@@ -1000,6 +1349,13 @@ def _action_name_to_sid(name: str) -> int:
     return 1
 
 
+def _to_str_coord(value, digits: int = 6) -> str:
+    try:
+        return f"{float(value or 0):.{digits}f}"
+    except (TypeError, ValueError):
+        return f"{0:.{digits}f}"
+
+
 def _to_int_scaled(value, scale: float = 1.0) -> int:
     try:
         return int(float(value or 0) * scale)
@@ -1008,15 +1364,18 @@ def _to_int_scaled(value, scale: float = 1.0) -> int:
 
 
 def _build_path_points(points):
-    """自主机动/编队机动路径点：lon/lat 缩放 1e6，alt 缩放 10"""
+    """自主机动/编队机动路径点：lon/lat/alt 保留小数点字符串形式"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
             continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
-            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
-            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "lon": _to_str_coord(lon, 6),
+            "lat": _to_str_coord(lat, 6),
+            "alt": _to_str_coord(alt, 1),
             "radius": pt.get("radius", -1),
             "type": pt.get("type", 1),
         })
@@ -1024,29 +1383,39 @@ def _build_path_points(points):
 
 
 def _build_area_points(points):
-    """侦察/电磁区域点：lon/lat 缩放 1e6，alt 缩放 10"""
+    """侦察/电磁区域点：lon/lat/alt 保留小数点字符串形式。
+
+    按协调卡协议，area 中 lon/lat/alt 为字符串类型，精度分别为
+    小数点后 6 位 / 6 位 / 2 位。
+    """
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
             continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
-            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
-            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "lon": f"{float(lon or 0):.6f}",
+            "lat": f"{float(lat or 0):.6f}",
+            "alt": f"{float(alt or 0):.2f}",
         })
     return result
 
 
 def _build_strike_points(points):
-    """打击类目标点公共字段"""
+    """打击类目标点公共字段：lon/lat/alt 保留小数点字符串形式"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
             continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
-            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
-            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "lon": _to_str_coord(lon, 6),
+            "lat": _to_str_coord(lat, 6),
+            "alt": _to_str_coord(alt, 1),
             "tart": pt.get("tart", 0),
             "attr": pt.get("attr", 0),
             "thr": pt.get("thr", 0),
@@ -1059,15 +1428,18 @@ def _build_strike_points(points):
 
 
 def _build_air_recon_points(points):
-    """空中侦察航路点：lon/lat 缩放 1e6，alt 缩放 10，保留飞行/相机扩展字段"""
+    """空中侦察航路点：lon/lat/alt 保留小数点字符串形式，保留飞行/相机扩展字段"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
             continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_int_scaled(pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0), 1e6),
-            "lat": _to_int_scaled(pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0), 1e6),
-            "alt": _to_int_scaled(pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0), 10),
+            "lon": _to_str_coord(lon, 6),
+            "lat": _to_str_coord(lat, 6),
+            "alt": _to_str_coord(alt, 1),
             "type": pt.get("type", 0),
             "speed": int(float(pt.get("speed", 0))),
             "camera": pt.get("camera", 1),
@@ -1170,9 +1542,9 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     if sid == 9:
         return {
             "sid": 9,
-            "pose": param.get("pose", [9000, 0, 0]),
-            "pose_deviation": param.get("pose_deviation", [36100, 9100, 9100]),
-            "limitd_speed": param.get("limited_speed", 10),
+            "pose": param.get("pose", [0, 0, 0]),
+            "pose_deviation": param.get("pose_deviation", [0, 0, 0]),
+            "limited_speed": param.get("limited_speed", 10),
             "safe_mode": param.get("safe_mode", 0),
         }
 
@@ -1215,6 +1587,16 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "area": _build_area_points(param.get("area")),
         }
 
+    # sid = 25/35/53: 机枪打击（简化字段：只保留 time/sort/num/points 中的 lon/lat/alt/tart）
+    if sid in (25, 35, 53) and action_type in ("gun-shot", "7.62mm-gun-shot"):
+        return {
+            "sid": sid,
+            "time": param.get("time", 60),
+            "sort": param.get("sort", 0),
+            "num": param.get("num", len(param.get("points", [])) or 1),
+            "points": _build_gun_shot_points(param.get("points")),
+        }
+
     # sid = 23/24/25/33/35/53: 各类打击（公共字段）
     if sid in (23, 24, 25, 33, 35, 53):
         service = {
@@ -1254,9 +1636,9 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "max": param.get("max", 10),
             "type": param.get("type", 1),
             "strategy": param.get("strategy", 0),
-            "lon": _to_int_scaled(param.get("lon", 0), 1e6),
-            "lat": _to_int_scaled(param.get("lat", 0), 1e6),
-            "alt": _to_int_scaled(param.get("alt", 0), 10),
+            "lon": _to_str_coord(param.get("lon", 0), 6),
+            "lat": _to_str_coord(param.get("lat", 0), 6),
+            "alt": _to_str_coord(param.get("alt", 0), 1),
         }
 
     # sid = 54/55: 强声拒止 / 强光拒止
@@ -1330,6 +1712,28 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
 
 
+def _build_gun_shot_points(points):
+    """机枪打击目标点：lon/lat/alt 保留小数点字符串形式，只保留 lon/lat/alt/tart"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
+        result.append({
+            "lon": _to_str_coord(lon, 6),
+            "lat": _to_str_coord(lat, 6),
+            "alt": _to_str_coord(alt, 1),
+            "tart": pt.get("tart", 0),
+        })
+    return result
+
+
+# 兜底（已上移，保留此注释避免遗漏）
+# return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
+
+
 def build_mission_data(
     plan: Dict[str, Any],
     vehicle_vmfs: Optional[Dict[str, int]] = None,
@@ -1390,12 +1794,13 @@ def build_mission_data(
                             vehicle_actions_map[vid] = []
                         for a in actions:
                             # 优先保留 action 自带的 action_type；car_actions 层级有值时才覆盖
-                            at = car_action_type or a.get("action_type", "")
+                            at = a.get("action_type") or car_action_type
                             vehicle_actions_map[vid].append(dict(a, action_type=at))
         elif isinstance(team_actions, list):
             for ta in team_actions:
                 team_id = ta.get("team_id", "")
-                vehicles = ta.get("team_actions", [])
+                # 标准 /simple 接口使用 car_actions，旧接口使用 team_actions
+                vehicles = ta.get("car_actions", ta.get("team_actions", []))
                 for vehicle in vehicles:
                     vid = vehicle.get("vid", "")
                     actions = vehicle.get("actions", [])
@@ -1404,7 +1809,7 @@ def build_mission_data(
                         if vid not in vehicle_actions_map:
                             vehicle_actions_map[vid] = []
                         for a in actions:
-                            at = car_action_type or a.get("action_type", "")
+                            at = a.get("action_type") or car_action_type
                             vehicle_actions_map[vid].append(dict(a, action_type=at))
 
     # 也兼容 vehicle_summary 结构
@@ -1439,32 +1844,45 @@ def build_mission_data(
             continue
         vmf = (vehicle_vmfs or {}).get(vid)
         if vmf is None:
+            # 优先从车辆控制服务缓存取 VMF
+            vmf = vehicle_control_client.get_vehicle_vmf(vid)
+        if vmf is None:
             # 尝试 vid 本身就是数字
             try:
                 vmf = int(vid)
             except (ValueError, TypeError):
                 vmf = 99076716  # 兜底：ZD01 的示例 vmf
 
-        vip = (vehicle_ips or {}).get(vid, "192.168.1.11")
+        vip = (vehicle_ips or {}).get(vid)
+        if vip is None:
+            # 优先从车辆控制服务缓存取 IP
+            vip = vehicle_control_client.get_vehicle_ip(vid)
+        if vip is None:
+            vip = "192.168.1.11"  # 兜底 IP
         num = len(actions)
 
         acts = []
         vehicle_type = vid_vehicle_type_map.get(vid, "")
         for idx, action in enumerate(actions, start=1):
             service = _build_service_from_action(action, vehicle_type)
-            act = {
+            param = action.get("param") or {}
+            strategy = _parse_mission_strategy(param)
+            act_start, act_end = _parse_mission_start_end(param, start_str, end_str)
+            act: Dict[str, Any] = {
                 "aid": idx,
                 "num": num,
                 "vid": [vmf],
                 "vip": [vip],
-                "strategy": 2,
-                "start": start_str,
-                "end": end_str,
+                "strategy": strategy,
                 "premise": list(range(1, idx)),  # 前置为前面所有 action
                 "endwith": -1,
                 "level": 0,
                 "service": service,
             }
+            # 只有真正设置了开始时间/时长时才下发 start/end，避免传默认值
+            if act_start and act_end:
+                act["start"] = act_start
+                act["end"] = act_end
             acts.append(act)
 
         mission_vehicles.append({
@@ -1474,13 +1892,28 @@ def build_mission_data(
             "acts": acts,
         })
 
+    # 任务整体时间：取所有 action 最早 start 和最晚 end；没有则用默认值
+    task_start, task_end = start_str, end_str
+    all_starts = []
+    all_ends = []
+    for acts in (v.get("acts") or [] for v in mission_vehicles):
+        for act in acts:
+            if act.get("start"):
+                all_starts.append(act["start"])
+            if act.get("end"):
+                all_ends.append(act["end"])
+    if all_starts:
+        task_start = min(all_starts)
+    if all_ends:
+        task_end = max(all_ends)
+
     mission_data = {
         "task": {
             "tid": tid,
             "type": 0,
             "cnt": title or f"任务{plan_id}",
-            "start": start_str,
-            "end": end_str,
+            "start": task_start,
+            "end": task_end,
             "vehicles": mission_vehicles,
         }
     }
@@ -1977,7 +2410,8 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                 plan = local_plan
             else:
                 print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}, vids_equal={vids_equal}), plan_id={plan_id}")
-                plan = remote_plan
+                # 用远程结构，但保留本地有效的 action.param 列表数据
+                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
                 task_pool.set(rid, plan)
     else:
         print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
@@ -2032,7 +2466,7 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     return task_pool.get(rid)
 
 
-def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def update_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """仅更新本地 task_pool 中的 PLAN 资源，不同步到数据服务器"""
     from app.services.task_pool import task_pool
 
@@ -2054,8 +2488,154 @@ def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optio
     return task_pool.get(rid)
 
 
-def sync_plan_to_operator(plan_id: str) -> bool:
-    """把本地 task_pool 中的 plan 通过 ingestion/import 同步到操控席数据服务器。
+# 兼容旧名：操控席本地更新与协同席共用同一套本地更新逻辑
+update_operator_plan_locally = update_plan_locally
+
+
+def update_plan(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """协同席 — 更新本地 task_pool 中的 PLAN 资源，并同步到协同席数据服务器。"""
+    updated = update_plan_locally(plan_id, payload)
+    if not updated:
+        return None
+    # 尝试同步到协同席数据服务器；失败不影响本地更新结果
+    try:
+        sync_plan_to_data_server(plan_id, _http_post, _http_get, label="data_server")
+    except Exception as e:
+        print(f"[UPDATE-PLAN] sync to data_server failed: {e}, plan_id={plan_id}")
+    return task_pool.get(plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}")
+
+
+def _is_empty_or_zero_list(value):
+    """判断列表是否为空或所有元素均为 0/空值（用于识别被投影丢失的列表参数）"""
+    if not isinstance(value, list) or len(value) == 0:
+        return True
+
+    def _is_zero(v):
+        if v in (0, 0.0, None, "", "0", "0.0", "0.00"):
+            return True
+        if isinstance(v, str):
+            try:
+                return float(v.strip()) == 0
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    for item in value:
+        if not isinstance(item, dict):
+            return False
+        for v in item.values():
+            if not _is_zero(v):
+                return False
+    return True
+
+
+def _merge_action_param(local_param, remote_param):
+    """合并本地与远程 action.param：当远程列表参数为空/全 0 而本地有有效数据时，保留本地数据。"""
+    if not isinstance(local_param, dict):
+        return remote_param
+    if not isinstance(remote_param, dict):
+        return copy.deepcopy(local_param)
+    merged = copy.deepcopy(remote_param)
+    list_fields = ("area", "points", "points1", "points2", "points3", "frequency", "waypoints")
+    for field in list_fields:
+        local_val = local_param.get(field)
+        remote_val = remote_param.get(field)
+        if (
+            _is_empty_or_zero_list(remote_val)
+            and isinstance(local_val, list)
+            and len(local_val) > 0
+            and not _is_empty_or_zero_list(local_val)
+        ):
+            merged[field] = copy.deepcopy(local_val)
+    for field in ("direct", "protect"):
+        local_val = local_param.get(field)
+        remote_val = remote_param.get(field)
+        if (not remote_val or not isinstance(remote_val, dict)) and isinstance(local_val, dict) and local_val:
+            merged[field] = copy.deepcopy(local_val)
+    return merged
+
+
+def _flatten_plan_actions(plan):
+    """把 plan.stages.team_actions 中的 action 展平，便于按 action_id/vid/seq 匹配。"""
+    results = []
+    for stage in plan.get("stages", []) or []:
+        stage_id = stage.get("stage_id", "")
+        team_actions = stage.get("team_actions", {})
+        vehicles = []
+        if isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                if isinstance(vlist, list):
+                    vehicles.extend(vlist)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles.extend(ta.get("car_actions", []) or [])
+                vehicles.extend(ta.get("team_actions", []) or [])
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            vid = vehicle.get("vid", "")
+            for action in vehicle.get("actions", []) or []:
+                if not isinstance(action, dict):
+                    continue
+                results.append({
+                    "stage_id": stage_id,
+                    "vid": vid,
+                    "action_id": action.get("action_id", ""),
+                    "action_seq": action.get("action_seq", 0),
+                    "param": action.get("param", {}),
+                })
+    return results
+
+
+def _merge_plan_keep_local_params(local_plan, remote_plan):
+    """用远程 plan 更新本地缓存，但保留本地有效的 action.param 列表数据，防止 /simple 投影丢失。"""
+    if not isinstance(remote_plan, dict):
+        return copy.deepcopy(local_plan) if isinstance(local_plan, dict) else {}
+    merged = copy.deepcopy(remote_plan)
+    local_actions = _flatten_plan_actions(local_plan)
+    # 建立索引：优先 action_id，其次 (vid, stage_id, action_seq)
+    by_id = {}
+    by_key = {}
+    for a in local_actions:
+        aid = a.get("action_id")
+        if aid:
+            by_id[aid] = a
+        key = (a.get("vid"), a.get("stage_id"), a.get("action_seq"))
+        by_key[key] = a
+
+    for stage in merged.get("stages", []) or []:
+        team_actions = stage.get("team_actions", {})
+        vehicles = []
+        if isinstance(team_actions, dict):
+            for vlist in team_actions.values():
+                if isinstance(vlist, list):
+                    vehicles.extend(vlist)
+        elif isinstance(team_actions, list):
+            for ta in team_actions:
+                vehicles.extend(ta.get("car_actions", []) or [])
+                vehicles.extend(ta.get("team_actions", []) or [])
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            vid = vehicle.get("vid", "")
+            for action in vehicle.get("actions", []) or []:
+                if not isinstance(action, dict):
+                    continue
+                local_action = by_id.get(action.get("action_id"))
+                if not local_action:
+                    local_action = by_key.get((vid, stage.get("stage_id", ""), action.get("action_seq", 0)))
+                if local_action:
+                    action["param"] = _merge_action_param(local_action.get("param", {}), action.get("param", {}))
+    return merged
+
+
+def sync_plan_to_data_server(
+    plan_id: str,
+    http_post,
+    http_get,
+    label: str = "data_server",
+) -> bool:
+    """把本地 task_pool 中的 plan 通过 ingestion/import 同步到指定数据服务器。
 
     经过测试，PATCH /resources/{rid} 无法保存 stages.team_actions 等嵌套字段，
     因此改用全量 import 方式 upsert，确保行动序列数据落盘到数据服务器。
@@ -2078,38 +2658,48 @@ def sync_plan_to_operator(plan_id: str) -> bool:
             "targets": plan.get("targets", []),
             "stages": plan.get("stages", []),
         }
-        result = _http_post_operator(
+        result = http_post(
             "/api/v1/task_pool/ingestion/import",
             {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
             silent=True,
         )
         if result is None:
             return False
-        # 同步成功后立即拉取数据服务器最新数据并更新本地缓存，确保本地与远程一致。
-        # 同时清除 local_dirty，让后续 get_plan_detail 正常比较。
+        # 同步成功后拉取数据服务器最新数据并更新本地缓存，但保留本地有效的 action.param，
+        # 避免 /simple 接口投影丢失 area/points 等列表参数后把本地数据覆盖成空/0。
         try:
-            remote = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+            remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
             if remote is not None and isinstance(remote, dict):
                 normalized = _normalize_plan_field_names(remote)
-                normalized["local_dirty"] = False
-                task_pool.set(rid, normalized)
-                print(f"[SYNC-PLAN] synced and refreshed local cache from remote, plan_id={plan_id}")
+                merged = _merge_plan_keep_local_params(plan, normalized)
+                merged["local_dirty"] = False
+                task_pool.set(rid, merged)
+                print(f"[SYNC-PLAN] synced and merged remote into local cache from {label}, plan_id={plan_id}")
             else:
                 # 拉取失败：保留 local_dirty，让后续 get_plan_detail 继续优先本地数据
                 local_plan = task_pool.get(rid)
                 if local_plan:
                     local_plan["local_dirty"] = True
                     task_pool.set(rid, local_plan)
-                print(f"[SYNC-PLAN] sync ok but refresh remote failed, keep local_dirty, plan_id={plan_id}")
+                print(f"[SYNC-PLAN] sync ok but refresh remote failed from {label}, keep local_dirty, plan_id={plan_id}")
         except Exception as refresh_err:
-            print(f"[SYNC-PLAN] sync ok but refresh local cache failed: {refresh_err}, plan_id={plan_id}")
+            print(f"[SYNC-PLAN] sync ok but refresh local cache failed from {label}: {refresh_err}, plan_id={plan_id}")
         return True
     except Exception as e:
-        print(f"[SYNC-PLAN] sync to operator failed: {e}")
+        print(f"[SYNC-PLAN] sync to {label} failed: {e}")
         return False
 
 
-def _cascade_delete_resource_on_operator(resource_id: str) -> Optional[Dict[str, Any]]:
+def sync_plan_to_operator(plan_id: str) -> bool:
+    """把本地 task_pool 中的 plan 同步到操控席数据服务器。"""
+    return sync_plan_to_data_server(plan_id, _http_post_operator, _http_get_operator, label="operator")
+
+
+def _cascade_delete_resource(
+    resource_id: str,
+    http_post,
+    label: str = "data_server",
+) -> Optional[Dict[str, Any]]:
     """调用数据服务器级联删除接口，将目标资源及其子资源标记为 DELETED。
 
     接口：POST /api/v1/task_pool/resources/{resource_id}/delete，body {"cascade": true}
@@ -2118,18 +2708,23 @@ def _cascade_delete_resource_on_operator(resource_id: str) -> Optional[Dict[str,
     if not resource_id:
         return None
     try:
-        resp = _http_post_operator(
+        resp = http_post(
             f"/api/v1/task_pool/resources/{resource_id}/delete",
             {"cascade": True},
             silent=True,
         )
         if resp is not None and isinstance(resp, dict):
             return resp
-        print(f"[DELETE-VEHICLE] cascade delete {resource_id} returned non-dict: {resp}")
+        print(f"[DELETE-VEHICLE] cascade delete {resource_id} from {label} returned non-dict: {resp}")
         return None
     except Exception as e:
-        print(f"[DELETE-VEHICLE] cascade delete {resource_id} failed: {e}")
+        print(f"[DELETE-VEHICLE] cascade delete {resource_id} from {label} failed: {e}")
         return None
+
+
+def _cascade_delete_resource_on_operator(resource_id: str) -> Optional[Dict[str, Any]]:
+    """调用操控席数据服务器级联删除接口。"""
+    return _cascade_delete_resource(resource_id, _http_post_operator, label="operator")
 
 
 def _normalize_car_action_resource_id(ca: Dict[str, Any]) -> Optional[str]:
@@ -2142,15 +2737,14 @@ def _normalize_car_action_resource_id(ca: Dict[str, Any]) -> Optional[str]:
     return ca_rid
 
 
-def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
-    """删除操控席方案中指定车辆的行动序列。
-
-    逻辑：
-    1. 从本地 plan 找到该车辆对应的所有 car_actions；
-    2. 调用数据服务器级联删除接口（cascade=true）删除 car_action 及其子 action；
-    3. 更新本地 task_pool，移除该车辆；
-    4. 调用 sync_plan_to_operator 把更新后的 plan 同步到数据服务器。
-    """
+def _delete_vehicle_from_plan(
+    plan_id: str,
+    vid: str,
+    http_post,
+    http_get,
+    label: str = "data_server",
+) -> Dict[str, Any]:
+    """删除指定方案中某车辆的行动序列，并同步到指定数据服务器。"""
     from app.services.task_pool import task_pool
 
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
@@ -2201,14 +2795,14 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
     deleted_action_ids = []
     deleted_car_action_ids = []
     for ca_rid in car_action_ids:
-        result = _cascade_delete_resource_on_operator(ca_rid)
+        result = _cascade_delete_resource(ca_rid, http_post, label=label)
         if result:
             deleted_car_action_ids.append(ca_rid)
             for deleted_id in result.get("deleted_resource_ids", []) or []:
                 if deleted_id.startswith("action:") and deleted_id not in deleted_action_ids:
                     deleted_action_ids.append(deleted_id)
         else:
-            print(f"[DELETE-VEHICLE] failed to cascade delete {ca_rid}, skip")
+            print(f"[DELETE-VEHICLE] failed to cascade delete {ca_rid} from {label}, skip")
 
     # 3) 更新本地 task_pool：移除该车辆
     updated_plan = copy.deepcopy(plan)
@@ -2230,7 +2824,7 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
     task_pool.set(rid, updated_plan)
 
     # 4) 同步到数据服务器
-    sync_ok = sync_plan_to_operator(plan_id)
+    sync_ok = sync_plan_to_data_server(plan_id, http_post, http_get, label=label)
 
     return {
         "ok": True,
@@ -2241,5 +2835,31 @@ def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
         "sync_ok": sync_ok,
     }
 
+
+def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
+    """删除操控席方案中指定车辆的行动序列。"""
+    return _delete_vehicle_from_plan(plan_id, vid, _http_post_operator, _http_get_operator, label="operator")
+
+
+def delete_vehicle(plan_id: str, vid: str) -> Dict[str, Any]:
+    """删除协同席方案中指定车辆的行动序列。"""
+    return _delete_vehicle_from_plan(plan_id, vid, _http_post, _http_get, label="data_server")
+
+
+def dispatch_plan_forward(plan_id: str, target_ips: List[str], timeout_seconds: int = 30) -> Dict[str, Any]:
+    """协同席 — 将指定 plan 通过数据服务器 /ingestion/forward 下发到目标席位。
+
+    返回包含数据服务器原始响应的 dict。
+    """
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    result = forward_resources_to_targets(
+        target_ips=target_ips,
+        resource_ids=[rid],
+        timeout_seconds=timeout_seconds,
+        silent=False,
+    )
+    if result is None:
+        return {"ok": False, "error": "调用数据服务器 /ingestion/forward 失败"}
+    return {"ok": True, "plan_id": plan_id, "target_ips": target_ips, "forward_result": result}
 
 

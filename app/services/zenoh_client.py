@@ -5,6 +5,8 @@ Zenoh 客户端封装层
 
 import json
 import threading
+import os
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from zenoh_py.zenoh_service import (
@@ -18,6 +20,22 @@ from zenoh_py.zenoh_service import (
     subscribe_topic,
     _DEFAULT_CLIENT,
 )
+
+# ---------- 日志文件 ----------
+ZENOH_LOG_FILE = os.environ.get("ZENOH_LOG_FILE", "/tmp/zenoh_payload.log")
+
+
+def _zenoh_log(level: str, message: str) -> None:
+    """写 Zenoh 接口日志到独立文件，并打印到 stdout。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    line = f"[{now}] [{level}] {message}"
+    print(line)
+    try:
+        with open(ZENOH_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f"[Zenoh] failed to write log to {ZENOH_LOG_FILE}: {e}")
+
 
 # ---------- 状态 ----------
 _initialized: bool = False
@@ -41,10 +59,10 @@ def initialize(
         if _initialized:
             return True
 
-        print("[Zenoh] Initializing...")
+        _zenoh_log("INFO", "Initializing...")
         ok = _zenoh_initialize(auto_subscribe_defaults=auto_subscribe_defaults)
         if not ok:
-            print(f"[Zenoh] initialize failed: {get_last_error()}")
+            _zenoh_log("ERROR", f"initialize failed: {get_last_error()}")
             return False
 
         _initialized = True
@@ -53,10 +71,10 @@ def initialize(
         is_local = getattr(_DEFAULT_CLIENT, "_local_peer_active", False)
         config_path = getattr(_DEFAULT_CLIENT, "_default_config_path", None)
         if is_local:
-            print("[Zenoh] Session initialized (LOCAL-PEER FALLBACK MODE — no external router)")
+            _zenoh_log("INFO", "Session initialized (LOCAL-PEER FALLBACK MODE — no external router)")
         else:
-            print("[Zenoh] Session initialized (ROUTER MODE)")
-        print(f"[Zenoh] Config path: {config_path}")
+            _zenoh_log("INFO", "Session initialized (ROUTER MODE)")
+        _zenoh_log("INFO", f"Config path: {config_path}")
 
         # 订阅用户指定的主题
         if topics:
@@ -81,9 +99,9 @@ def close() -> bool:
         _default_topics.clear()
 
         if ok:
-            print("[Zenoh] Session closed.")
+            _zenoh_log("INFO", "Session closed.")
         else:
-            print(f"[Zenoh] close failed: {get_last_error()}")
+            _zenoh_log("ERROR", f"close failed: {get_last_error()}")
         return ok
 
 
@@ -94,10 +112,20 @@ def health() -> bool:
     return _zenoh_health()
 
 
+def _format_payload(payload: Any) -> str:
+    """将 payload 格式化为多行 JSON 字符串，便于日志阅读。"""
+    try:
+        if isinstance(payload, (dict, list)):
+            return "\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+        return str(payload)
+    except Exception:
+        return str(payload)
+
+
 def publish(topic: str, payload: Any) -> bool:
     """发布消息到指定主题"""
     if not _initialized:
-        print("[Zenoh] cannot publish: not initialized")
+        _zenoh_log("WARN", "cannot publish: not initialized")
         return False
 
     # 判断当前模式
@@ -105,13 +133,17 @@ def publish(topic: str, payload: Any) -> bool:
     mode = "LOCAL-PEER" if is_local else "ROUTER"
 
     payload_str = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload)
-    print(f"[ZENOH-OUT] mode={mode} | topic={topic} | payload_size={len(payload_str.encode('utf-8'))} bytes")
+    formatted = _format_payload(payload)
+    _zenoh_log(
+        "OUT",
+        f"mode={mode} | topic={topic} | payload_size={len(payload_str.encode('utf-8'))} bytes | payload={formatted}",
+    )
 
     ok = publish_topic(topic, payload)
     if not ok:
-        print(f"[Zenoh] publish to '{topic}' failed: {get_last_error()}")
+        _zenoh_log("ERROR", f"publish to '{topic}' failed: {get_last_error()}")
     else:
-        print(f"[ZENOH-OUT] publish ok | topic={topic} | mode={mode}")
+        _zenoh_log("OUT", f"publish ok | topic={topic} | mode={mode}")
     return ok
 
 
@@ -124,7 +156,7 @@ def _dispatch_message(message: Dict[str, Any]) -> None:
                 try:
                     cb(message)
                 except Exception as exc:
-                    print(f"[Zenoh] callback error on '{subscribed_topic}': {exc}")
+                    _zenoh_log("ERROR", f"callback error on '{subscribed_topic}': {exc}")
 
 
 def subscribe(
@@ -134,7 +166,7 @@ def subscribe(
 ) -> bool:
     """订阅主题，可注册回调"""
     if not _initialized:
-        print("[Zenoh] cannot subscribe: not initialized")
+        _zenoh_log("WARN", "cannot subscribe: not initialized")
         return False
 
     # 注册回调
@@ -151,9 +183,9 @@ def subscribe(
         on_message=_dispatch_message,
     )
     if not ok:
-        print(f"[Zenoh] subscribe '{topic}' failed: {get_last_error()}")
+        _zenoh_log("ERROR", f"subscribe '{topic}' failed: {get_last_error()}")
     else:
-        print(f"[Zenoh] subscribed: {topic}")
+        _zenoh_log("INFO", f"subscribed: {topic}")
     return ok
 
 
@@ -191,7 +223,7 @@ def subscribe_vehicle_feedbacks(vehicle_id: str) -> bool:
     根据协议文档订阅：ack、task_received_status、mission_status、navi/data、chassis_resource
     """
     if not _initialized:
-        print(f"[Zenoh] cannot subscribe feedbacks: not initialized")
+        _zenoh_log("WARN", "cannot subscribe feedbacks: not initialized")
         return False
 
     topics = [
@@ -205,9 +237,9 @@ def subscribe_vehicle_feedbacks(vehicle_id: str) -> bool:
     for topic in topics:
         ok = subscribe_topic(topic=topic, buffer_size=FEEDBACK_BUFFER_SIZE, on_message=_on_feedback_message)
         if ok:
-            print(f"[Zenoh] feedback subscribed: {topic}")
+            _zenoh_log("INFO", f"feedback subscribed: {topic}")
         else:
-            print(f"[Zenoh] feedback subscribe failed: {topic} | err={get_last_error()}")
+            _zenoh_log("ERROR", f"feedback subscribe failed: {topic} | err={get_last_error()}")
             ok_all = False
     return ok_all
 
@@ -219,7 +251,7 @@ def _on_feedback_message(message: Dict[str, Any]) -> None:
     timestamp = message.get("timestamp", "")
 
     # 打印入站日志
-    print(f"[ZENOH-IN] topic={topic} | ts={timestamp} | payload={payload_text[:800]}")
+    _zenoh_log("IN", f"topic={topic} | ts={timestamp} | payload={payload_text}")
 
     # 缓存
     with _feedback_buffer_lock:

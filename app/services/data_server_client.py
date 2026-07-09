@@ -18,7 +18,7 @@ except ImportError:
 # ========== 配置 ==========
 
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
-OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"  # 操控席数据服务端（后续可独立配置）
+OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.56:28801"  # 操控席数据服务端
 RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"  # 资源池重构版服务端口
 TIMEOUT_SECONDS = (1, 2)  # (connect timeout, read timeout)；连接 1s、读取 2s，断连时快速失败
 MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
@@ -105,7 +105,34 @@ def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = Fals
         return None
 
 
-# ========== 对外接口 ==========
+def forward_resources_to_targets(
+    target_ips: List[str],
+    resource_ids: List[str],
+    timeout_seconds: int = 30,
+    silent: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """调用协同席数据服务器的 /ingestion/forward 接口，将资源下发到指定目标席位。"""
+    if not HAS_REQUESTS:
+        return None
+    url = f"{DATA_SERVER_BASE_URL}/api/v1/task_pool/ingestion/forward"
+    body = {
+        "target_ips": target_ips,
+        "resource_ids": resource_ids,
+        "timeout_seconds": timeout_seconds,
+    }
+    body_summary = json.dumps(body, ensure_ascii=False)[:300]
+    try:
+        if not silent:
+            print(f"[DS-OUT] POST {url} | body={body_summary}")
+        resp = requests.post(url, json=body, timeout=(1, timeout_seconds), proxies={"http": None, "https": None})
+        if not silent:
+            print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        if not silent:
+            print(f"[DS-ERR] POST {url} | error={e}")
+        return None
 
 def get_kill_chain(resource_id: str) -> Optional[Dict[str, Any]]:
     """查询单个杀伤链详情"""

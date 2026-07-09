@@ -14,6 +14,7 @@ from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
 from app.services import zenoh_client
 from app.data.mock_data import preload_mock_data
+from app.services import vehicle_control_client
 
 
 @asynccontextmanager
@@ -24,12 +25,14 @@ async def lifespan(app: FastAPI):
     app.state.task_pool = task_pool
     app.state.sse_manager = sse_manager
 
+    # 初始化车辆控制服务车辆信息缓存
+    vehicle_control_client.refresh_vehicle_info()
+    vehicle_control_client.start_auto_refresh()
+
     # 初始化 zenoh（local_peer_fallback 允许无 router 时本地回退）
     zenoh_ok = zenoh_client.initialize(auto_subscribe_defaults=True)
     if zenoh_ok:
-        print("[ZK Backend] Zenoh ready.")
-        # 自动订阅默认车辆 ZD01 的 MissionService 反馈
-        zenoh_client.subscribe_vehicle_feedbacks("ZD01")
+        print("[ZK Backend] Zenoh ready. Vehicle feedback subscription is deferred until user selects a vehicle.")
     else:
         print(f"[ZK Backend] Zenoh init failed (may fall back to local-peer): {zenoh_client.get_last_zenoh_error()}")
 
