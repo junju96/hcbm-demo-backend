@@ -33,7 +33,7 @@ def _infer_resource_type_from_vid(vid: str) -> str:
 
     支持真实装备编号前缀：
       ZD/Recon-Strike-UGV, XL/Patrol-UGV, HL/Fire-Support-UGV,
-      DD/EM-UGV, KD/KD-UGV(Air-Ground-UAV)
+      DC/Electronic-UGV, DD/Electronic-UGV(兼容), KD/Air-Ground-UAV
     """
     v = (vid or "").lower()
     # 真实装备编号前缀
@@ -43,6 +43,8 @@ def _infer_resource_type_from_vid(vid: str) -> str:
         return "Patrol-UGV"
     if re.search(r"(^|[:_-])hl\d", v):
         return "Fire-Support-UGV"
+    if re.search(r"(^|[:_-])dc\d", v):
+        return "Electronic-UGV"
     if re.search(r"(^|[:_-])dd\d", v):
         return "Electronic-UGV"
     if re.search(r"(^|[:_-])kd\d", v):
@@ -777,7 +779,8 @@ def _infer_vehicle_type_from_action_type(action_type: str) -> str:
 
 def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -> Dict[str, Any]:
     """转换为前端需要的 Plan + ActionSequence 格式"""
-    # 先建立 vid -> resource_type 映射（从 plan.teams 查找）
+    # 先建立 vid -> resource_type 映射（从 plan.teams 查找；若 teams 中 resource_type 为空，
+    # 优先回退到在线车辆缓存，最后按 vid 前缀推断）
     team_type_map: Dict[str, str] = {}
     for team in plan.get("teams", []):
         if not isinstance(team, dict):
@@ -786,23 +789,34 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         team_resource_type = team.get("resource_type", "")
         for v in vehicles:
             if isinstance(v, dict) and v.get("vid"):
-                team_type_map[v["vid"]] = v.get("resource_type") or team_resource_type or ""
+                vid = v["vid"]
+                rt = v.get("resource_type") or team_resource_type or ""
+                if not rt:
+                    rt = _online_vehicle_type_cache.get(vid) or _infer_resource_type_from_vid(vid) or ""
+                team_type_map[vid] = rt
             elif isinstance(v, str):
                 # 数据服务器 team_equipments 仅返回 vid 字符串时，
                 # 优先查在线车辆缓存，其次根据 vid 前缀推断。
                 cached = _online_vehicle_type_cache.get(v)
                 team_type_map[v] = cached or _infer_resource_type_from_vid(v) or ""
         if team.get("vid"):
-            team_type_map[team["vid"]] = team_resource_type or ""
+            team_type_map[team["vid"]] = team_resource_type or team_type_map.get(team["vid"], "") or ""
 
     # 车辆汇总：按 vid 聚合所有阶段中的行动
     vehicle_map: Dict[str, Dict[str, Any]] = {}
     for ca in car_actions:
         vid = ca["vid"]
         if vid not in vehicle_map:
+            # 车型判断优先级：plan.teams > 在线车辆缓存 > vid 前缀推断 > action_type 兜底
+            resource_type = (
+                team_type_map.get(vid)
+                or _online_vehicle_type_cache.get(vid)
+                or _infer_resource_type_from_vid(vid)
+                or ""
+            )
             vehicle_map[vid] = {
                 "vid": vid,
-                "resource_type": team_type_map.get(vid) or _infer_resource_type_from_vid(vid),
+                "resource_type": resource_type,
                 "total_actions": 0,
                 "current_state": "READY",
                 "stages": [],
@@ -2107,15 +2121,24 @@ _RESOURCE_TYPE_TO_VEHICLE = {
 
 
 def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
-    """从资源池 equipment 记录推断内部车辆类型。"""
-    # 1) 优先使用 resource_type
+    """从资源池 equipment 记录推断内部车辆类型。
+
+    真实装备编号前缀优先级最高，用于覆盖资源池中可能错误的 resource_type。
+    """
+    rid = (equipment.get("resource_id") or "").strip()
+    # 1) 优先按真实装备编号前缀推断
+    inferred_from_vid = _infer_resource_type_from_vid(rid)
+    if inferred_from_vid:
+        return inferred_from_vid
+
+    # 2) 其次使用 resource_type
     rt = (equipment.get("resource_type") or "").strip()
     if rt in VEHICLE_TYPE_DISPLAY_NAMES:
         return rt
     if rt in _RESOURCE_TYPE_TO_VEHICLE:
         return _RESOURCE_TYPE_TO_VEHICLE[rt]
 
-    # 2) 其次 model_type.description / model_type.type
+    # 3) 再次 model_type.description / model_type.type
     model = equipment.get("model_type") or {}
     for key in ("description", "type"):
         md = (model.get(key) or "").strip()
@@ -2124,7 +2147,7 @@ def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
         if md in _RESOURCE_TYPE_TO_VEHICLE:
             return _RESOURCE_TYPE_TO_VEHICLE[md]
 
-    # 3) 兜底：返回原始 resource_type，让前端自行决定展示/映射
+    # 4) 兜底：返回原始 resource_type，让前端自行决定展示/映射
     return rt or "Unknown"
 
 
