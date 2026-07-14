@@ -115,6 +115,9 @@ async def select_vehicle(body: SelectVehicleRequest):
             "subscribed": True,
         })
     return ApiResponse(code=500, message=f"订阅车辆 {vehicle_id} 反馈失败", data={"selected": vehicle_id})
+
+
+@router.get("/action-sequences/plans", response_model=ApiResponse)
 async def list_plans(limit: int = 200):
     """获取行动方案列表"""
     items = query_plans(limit=limit)

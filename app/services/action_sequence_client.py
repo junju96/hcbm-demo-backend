@@ -186,7 +186,8 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
 
                 for item in results:
                     if item.get("vid") in vid_to_best_actions and not item.get("actions"):
-                        item["actions"] = copy.deepcopy(vid_to_best_actions[item["vid"]])
+                        # 数据服务器返回的整数坐标转回浮点
+                        item["actions"] = _scale_coords_to_float(vid_to_best_actions[item["vid"]])
                         print(f"[AS-DEBUG] filled actions for vid={item.get('vid')} from CAR_ACTIONS/ACTION, len={len(item['actions'])}")
         except Exception as e:
             print(f"[AS-DEBUG] query CAR_ACTIONS failed: {e}")
@@ -359,6 +360,9 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
                 print(f"[AS-DEBUG] get_plan_detail use remote (remote_actions={remote_actions}, local_actions={local_actions}), plan_id={plan_id}")
                 plan = _merge_plan_keep_local_params(local_plan, plan)
 
+        # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
+        plan = _scale_coords_to_float(plan)
+
         # 同步缓存到本地 task_pool，方便后续 PATCH 更新
         task_pool.set(rid, plan)
     else:
@@ -369,6 +373,9 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     if plan is None:
         print(f"[AS-DEBUG] plan={plan_id} not found in data_server or local task_pool")
         return None
+
+    # 本地缓存中的坐标已为浮点，确保反缩放（对浮点无影响）
+    plan = _scale_coords_to_float(plan)
 
     car_actions = _build_car_actions_from_plan(plan)
     result = _to_frontend_plan(plan, car_actions)
@@ -932,6 +939,7 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
         data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
         if data is not None and isinstance(data, dict):
             plan = _normalize_plan_field_names(data)
+            plan = _scale_coords_to_float(plan)
             task_pool.set(rid, plan)
 
     if plan is None:
@@ -1004,6 +1012,7 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
         data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
         if data is not None and isinstance(data, dict):
             plan = _normalize_plan_field_names(data)
+            plan = _scale_coords_to_float(plan)
             task_pool.set(rid, plan)
 
     if plan is None:
@@ -1377,8 +1386,98 @@ def _to_int_scaled(value, scale: float = 1.0) -> int:
         return 0
 
 
+# ---------- 元任务经纬高坐标整型化缩放工具 ----------
+# 数据服务器侧要求 lon/lat/alt 以整数存储，精度为 10^6（即 6 位小数）;
+# 前端与本地 task_pool 仍保持十进制浮点数。
+_COORD_FIELDS = {"lon", "lat", "alt", "longitude", "latitude", "altitude"}
+_COORD_SCALE = 1_000_000
+
+
+def _coord_to_int(value: Any, key: str = "") -> int:
+    """将单个坐标值乘以 10^6 后取整；非法值返回 0。"""
+    try:
+        return int(float(value or 0) * _COORD_SCALE)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coord_to_float(value: Any, key: str = "") -> Any:
+    """将缩放后的整数坐标转回浮点。
+    兼容旧数据：浮点数保持原样；字符串尝试解析为浮点；
+    整数/整数形式浮点统一除以 10^6（按需求，数据服务器侧存储的坐标均为缩放后的整数）。
+    对整数形式浮点做阈值判断，避免误除合法的未缩放小整数坐标。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value / _COORD_SCALE
+    if isinstance(value, float):
+        # 数据服务器某些实现可能把整型坐标序列化为 X.0 浮点
+        if value.is_integer() and abs(value) >= 1000:
+            return value / _COORD_SCALE
+        return value
+    if isinstance(value, str):
+        try:
+            s = value.strip()
+            if s == "":
+                return value
+            v = float(s)
+            if v.is_integer():
+                return int(v) / _COORD_SCALE
+            return v
+        except (ValueError, TypeError):
+            return value
+    return value
+
+
+def _transform_coords_in_param(param: Any, transform_fn) -> Any:
+    """递归遍历 action.param 内的 dict/list，对坐标字段应用 transform_fn。"""
+    if isinstance(param, list):
+        return [_transform_coords_in_param(item, transform_fn) for item in param]
+    if isinstance(param, dict):
+        result = {}
+        for k, v in param.items():
+            if k in _COORD_FIELDS and v is not None:
+                result[k] = transform_fn(v, k)
+            else:
+                result[k] = _transform_coords_in_param(v, transform_fn)
+        return result
+    return param
+
+
+def _scale_coords_in_plan(plan: Dict[str, Any], transform_fn) -> Dict[str, Any]:
+    """深拷贝 plan，并扫描所有 action.param 做坐标缩放/反缩放。"""
+    plan = copy.deepcopy(plan)
+
+    def walk(obj):
+        if isinstance(obj, list):
+            for item in obj:
+                walk(item)
+        elif isinstance(obj, dict):
+            if "param" in obj and isinstance(obj["param"], dict):
+                obj["param"] = _transform_coords_in_param(obj["param"], transform_fn)
+            for v in obj.values():
+                walk(v)
+
+    walk(plan)
+    return plan
+
+
+def _scale_coords_to_int(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """把 plan 中所有 action.param 的经纬高坐标从浮点/字符串转为缩放后的整数。"""
+    return _scale_coords_in_plan(plan, _coord_to_int)
+
+
+def _scale_coords_to_float(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """把 plan 中所有 action.param 的经纬高坐标从缩放后的整数转回浮点（兼容旧字符串/浮点数据）。"""
+    return _scale_coords_in_plan(plan, _coord_to_float)
+
+
+# ---------- 坐标缩放工具结束 ----------
+
+
 def _build_path_points(points):
-    """自主机动/编队机动路径点：lon/lat/alt 保留小数点字符串形式"""
+    """自主机动/编队机动路径点：lon/lat/alt 以 10^6 缩放后的整数形式下发。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1387,9 +1486,9 @@ def _build_path_points(points):
         lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
         alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_str_coord(lon, 6),
-            "lat": _to_str_coord(lat, 6),
-            "alt": _to_str_coord(alt, 1),
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
             "radius": pt.get("radius", -1),
             "type": pt.get("type", 1),
         })
@@ -1397,11 +1496,7 @@ def _build_path_points(points):
 
 
 def _build_area_points(points):
-    """侦察/电磁区域点：lon/lat/alt 保留小数点字符串形式。
-
-    按协调卡协议，area 中 lon/lat/alt 为字符串类型，精度分别为
-    小数点后 6 位 / 6 位 / 2 位。
-    """
+    """侦察/电磁区域点：lon/lat/alt 以 10^6 缩放后的整数形式下发。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1410,15 +1505,15 @@ def _build_area_points(points):
         lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
         alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": f"{float(lon or 0):.6f}",
-            "lat": f"{float(lat or 0):.6f}",
-            "alt": f"{float(alt or 0):.2f}",
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
         })
     return result
 
 
 def _build_strike_points(points):
-    """打击类目标点公共字段：lon/lat/alt 保留小数点字符串形式"""
+    """打击类目标点公共字段：lon/lat/alt 以 10^6 缩放后的整数形式下发。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1427,9 +1522,9 @@ def _build_strike_points(points):
         lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
         alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_str_coord(lon, 6),
-            "lat": _to_str_coord(lat, 6),
-            "alt": _to_str_coord(alt, 1),
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
             "tart": pt.get("tart", 0),
             "attr": pt.get("attr", 0),
             "thr": pt.get("thr", 0),
@@ -1442,7 +1537,7 @@ def _build_strike_points(points):
 
 
 def _build_air_recon_points(points):
-    """空中侦察航路点：lon/lat/alt 保留小数点字符串形式，保留飞行/相机扩展字段"""
+    """空中侦察航路点：lon/lat/alt 以 10^6 缩放后的整数形式下发，保留飞行/相机扩展字段。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1451,9 +1546,9 @@ def _build_air_recon_points(points):
         lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
         alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_str_coord(lon, 6),
-            "lat": _to_str_coord(lat, 6),
-            "alt": _to_str_coord(alt, 1),
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
             "type": pt.get("type", 0),
             "speed": int(float(pt.get("speed", 0))),
             "camera": pt.get("camera", 1),
@@ -1650,9 +1745,9 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "max": param.get("max", 10),
             "type": param.get("type", 1),
             "strategy": param.get("strategy", 0),
-            "lon": _to_str_coord(param.get("lon", 0), 6),
-            "lat": _to_str_coord(param.get("lat", 0), 6),
-            "alt": _to_str_coord(param.get("alt", 0), 1),
+            "lon": _coord_to_int(param.get("lon", 0)),
+            "lat": _coord_to_int(param.get("lat", 0)),
+            "alt": _coord_to_int(param.get("alt", 0)),
         }
 
     # sid = 54/55: 强声拒止 / 强光拒止
@@ -1727,7 +1822,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
 
 
 def _build_gun_shot_points(points):
-    """机枪打击目标点：lon/lat/alt 保留小数点字符串形式，只保留 lon/lat/alt/tart"""
+    """机枪打击目标点：lon/lat/alt 以 10^6 缩放后的整数形式下发，只保留 lon/lat/alt/tart。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1736,9 +1831,9 @@ def _build_gun_shot_points(points):
         lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
         alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
         result.append({
-            "lon": _to_str_coord(lon, 6),
-            "lat": _to_str_coord(lat, 6),
-            "alt": _to_str_coord(alt, 1),
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
             "tart": pt.get("tart", 0),
         })
     return result
@@ -2443,6 +2538,9 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     if plan is None:
         return None
 
+    # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
+    plan = _scale_coords_to_float(plan)
+
     car_actions = _build_car_actions_from_plan(plan)
     result = _to_frontend_plan(plan, car_actions)
     # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
@@ -2451,10 +2549,10 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
 
 
 def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """将行动方案原样 import 到操控席数据服务器"""
+    """将行动方案 import 到操控席数据服务器；写入前将经纬高坐标缩放为整数。"""
     result = _http_post_operator(
         "/api/v1/task_pool/ingestion/import",
-        {"resources": [plan], "return_data_type": "typed", "ignore_errors": True},
+        {"resources": [_scale_coords_to_int(plan)], "return_data_type": "typed", "ignore_errors": True},
     )
     return result
 
@@ -2681,6 +2779,8 @@ def sync_plan_to_data_server(
             "targets": plan.get("targets", []),
             "stages": plan.get("stages", []),
         }
+        # 数据服务器要求 action.param 中的经纬高以 10^6 缩放后的整数存储
+        payload = _scale_coords_to_int(payload)
         result = http_post(
             "/api/v1/task_pool/ingestion/import",
             {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
@@ -2694,6 +2794,8 @@ def sync_plan_to_data_server(
             remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
             if remote is not None and isinstance(remote, dict):
                 normalized = _normalize_plan_field_names(remote)
+                # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
+                normalized = _scale_coords_to_float(normalized)
                 merged = _merge_plan_keep_local_params(plan, normalized)
                 merged["local_dirty"] = False
                 task_pool.set(rid, merged)
