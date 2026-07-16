@@ -2712,6 +2712,9 @@ def _merge_plan_keep_local_params(local_plan, remote_plan):
     """用远程 plan 更新本地缓存，但保留本地有效的 action.param 列表数据，防止 /simple 投影丢失。"""
     if not isinstance(remote_plan, dict):
         return copy.deepcopy(local_plan) if isinstance(local_plan, dict) else {}
+    if not isinstance(local_plan, dict):
+        # 本地无缓存时直接返回远程 plan
+        return copy.deepcopy(remote_plan)
     merged = copy.deepcopy(remote_plan)
     local_actions = _flatten_plan_actions(local_plan)
     # 建立索引：优先 action_id，其次 (vid, stage_id, action_seq)
