@@ -1798,6 +1798,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     if sid == 41:
         service = {
             "sid": 41,
+            "type": param.get("type", 4),
             "mode": param.get("mode", 3),
             "time": param.get("time", 300),
             "num": param.get("num", 1),
@@ -1814,6 +1815,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     if sid in (42, 43):
         service = {
             "sid": sid,
+            "type": param.get("type", 4),
             "mode": param.get("mode", 3),
             "time": param.get("time", 300),
             "sort": param.get("sort", 1),
