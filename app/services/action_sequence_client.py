@@ -469,8 +469,8 @@ _STANDARD_ACTION_TYPES = {
     "search-and-shoot", "recon-strike", "40mm-gun-launch", "at-missile-launch",
     "gun-shot", "7.62mm-gun-shot", "rocket-launch", "loitering-munition-launch",
     "laser-illumination", "sound-expel", "acoustic-deterrence", "light-expel",
-    "light-deterrence", "em-recon", "electronic-recon", "em-interference",
-    "electronic-jamming", "payload-silent",
+    "light-deterrence", "em-recon", "electronic-recon", "em-assault", "electronic-assault",
+    "em-interference", "electronic-jamming", "payload-silent",
 }
 
 
@@ -520,6 +520,8 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "light-deterrence": "light-expel",
         "em-recon": "em-recon",
         "electronic-recon": "em-recon",
+        "em-assault": "em-assault",
+        "electronic-assault": "em-assault",
         "em-interference": "em-interference",
         "electronic-jamming": "em-interference",
         "payload-silent": "payload-silent",
@@ -554,6 +556,7 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         # 空地车 / 电磁车
         "ag-air-recon": "air-recon",
         "el-recon": "em-recon",
+        "el-assault": "em-assault",
         "el-jam": "em-interference",
         "el-silent": "payload-silent",
     }
@@ -590,9 +593,12 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
         if "thr" in p and p.get("dam") == 0:
             return "sound-expel" if p.get("ammo") == 0 else "light-expel"
 
-    # 电磁侦察 / 电磁干扰
+    # 电磁侦察 / 电磁突击 / 电磁干扰
+    # 区分依据：sort=0 为突击，sort=1 为干扰；无 sort 时按 protect 兜底为干扰
     if "frequency" in p:
-        if "protect" in p or p.get("sort") == 1:
+        if p.get("sort") == 0:
+            return "em-assault"
+        if p.get("sort") == 1 or "protect" in p:
             return "em-interference"
         return "em-recon"
 
@@ -706,6 +712,7 @@ def _infer_action_type_from_name(name: str) -> str:
         "强声拒止": "sound-expel",
         "强光拒止": "light-expel",
         "电磁侦察": "em-recon",
+        "电磁突击": "em-assault",
         "电磁干扰": "em-interference",
         "载荷静默": "payload-silent",
     }
@@ -748,6 +755,8 @@ def _infer_action_type_from_name(name: str) -> str:
         "lightdeterrence": "light-expel",
         "emrecon": "em-recon",
         "electronicrecon": "em-recon",
+        "emassault": "em-assault",
+        "electronicassault": "em-assault",
         "eminterference": "em-interference",
         "electronicjamming": "em-interference",
         "payloadsilent": "payload-silent",
@@ -776,7 +785,8 @@ def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     if t in {"sound-expel", "acoustic-deterrence", "light-expel", "light-deterrence"}:
         return "Patrol-UGV"
     # 电磁车
-    if t in {"em-recon", "electronic-recon", "em-interference", "electronic-jamming", "payload-silent"}:
+    if t in {"em-recon", "electronic-recon", "em-assault", "electronic-assault",
+             "em-interference", "electronic-jamming", "payload-silent"}:
         return "Electronic-UGV"
     # 空地车
     if t in {"air-recon", "air_recon", "ag_air_recon"}:
@@ -2196,7 +2206,7 @@ VEHICLE_ACTION_TYPES = {
         "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
         "Sound-Expel", "Light-Expel",
     ],
-    "Electronic-UGV": ["EM-Recon", "EM-Interference", "Payload-Silent"],
+    "Electronic-UGV": ["EM-Recon", "EM-Assault", "EM-Interference", "Payload-Silent"],
     "Air-Ground-UAV": ["Air-Recon"],
 }
 
