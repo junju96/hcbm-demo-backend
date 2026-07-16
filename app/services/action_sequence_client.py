@@ -1297,12 +1297,15 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
         }.get(t)
 
     # 电磁车 (sid 40~48，不含整车模式)
+    # 协议定义：42=DC突击，43=DC干扰
     if vt == "electronic":
         return {
             "em-recon": 41,
             "electronic-recon": 41,
-            "em-interference": 42,
-            "electronic-jamming": 42,
+            "em-assault": 42,
+            "electronic-assault": 42,
+            "em-interference": 43,
+            "electronic-jamming": 43,
             "payload-silent": 48,
         }.get(t)
 
@@ -1350,8 +1353,10 @@ def _action_name_to_sid(name: str) -> int:
         return 55
     if "电磁侦察" in n or "电侦" in n or "频谱" in n:
         return 41
-    if "电磁" in n or "干扰" in n or "突击" in n:
+    if "电磁突击" in n or "电磁压制" in n:
         return 42
+    if "电磁干扰" in n or "干扰" in n:
+        return 43
     if "载荷静默" in n:
         return 48
     if "火箭" in n:
@@ -1795,10 +1800,10 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             service["direct"] = direct
         return service
 
-    # sid = 42: 电磁突击 / 电磁干扰
-    if sid == 42:
+    # sid = 42/43: 电磁突击 / 电磁干扰
+    if sid in (42, 43):
         service = {
-            "sid": 42,
+            "sid": sid,
             "mode": param.get("mode", 3),
             "time": param.get("time", 300),
             "sort": param.get("sort", 1),
