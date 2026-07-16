@@ -584,9 +584,12 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
     if any(k in p for k in ("ene", "freq", "meat")):
         return "laser-illumination"
 
-    # 空中侦察：空地车特有字段
-    if "points1" in p or "points2" in p or "points3" in p:
-        return "air-recon"
+    # 空中侦察：空地车特有字段（points 且点内含 camera/speed/gimpitch 等飞行字段）
+    air_points = p.get("points") or []
+    if isinstance(air_points, list) and air_points:
+        first = air_points[0]
+        if isinstance(first, dict) and any(k in first for k in ("camera", "speed", "gimpitch", "gimyaw", "playaw", "zoom", "loiter")):
+            return "air-recon"
 
     # 强声/强光拒止：有 area 且 attr 字段
     if "area" in p and "attr" in p:
@@ -1789,9 +1792,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "type": param.get("type", 2),
             "mode": param.get("mode", 1),
             "time": param.get("time", 120),
-            "points1": _build_air_recon_points(param.get("points1")),
-            "points2": _build_air_recon_points(param.get("points2")),
-            "points3": _build_air_recon_points(param.get("points3")),
+            "points": _build_air_recon_points(param.get("points")),
         }
 
     # sid = 41: 电磁侦察
@@ -2703,7 +2704,7 @@ def _merge_action_param(local_param, remote_param):
     if not isinstance(remote_param, dict):
         return copy.deepcopy(local_param)
     merged = copy.deepcopy(remote_param)
-    list_fields = ("area", "points", "points1", "points2", "points3", "frequency", "waypoints")
+    list_fields = ("area", "points", "frequency", "waypoints")
     for field in list_fields:
         local_val = local_param.get(field)
         remote_val = remote_param.get(field)

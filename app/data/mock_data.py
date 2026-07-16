@@ -501,9 +501,7 @@ def _build_fake_action_sequence_plan():
                    "type": 2,
                    "mode": 1,
                    "time": 120,
-                   "points1": [air_recon_point],
-                   "points2": [],
-                   "points3": [],
+                   "points": [air_recon_point],
                }),
     ]
 
