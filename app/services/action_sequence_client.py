@@ -1973,6 +1973,10 @@ def build_mission_data(
             # 优先从车辆控制服务缓存取 VMF
             vmf = vehicle_control_client.get_vehicle_vmf(vid)
         if vmf is None:
+            # 其次从资源池在线车辆取 VMF
+            rp_info = get_online_vehicle_info_from_resource_pool(vid)
+            vmf = rp_info.get("vmf") if rp_info else None
+        if vmf is None:
             # 尝试 vid 本身就是数字
             try:
                 vmf = int(vid)
@@ -1983,6 +1987,10 @@ def build_mission_data(
         if vip is None:
             # 优先从车辆控制服务缓存取 IP
             vip = vehicle_control_client.get_vehicle_ip(vid)
+        if vip is None:
+            # 其次从资源池在线车辆取 IP
+            rp_info = get_online_vehicle_info_from_resource_pool(vid)
+            vip = rp_info.get("ip") if rp_info else None
         if vip is None:
             vip = "192.168.1.11"  # 兜底 IP
         num = len(actions)
@@ -2326,6 +2334,16 @@ def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[
         # 无法识别的类型，跳过（或保留原始类型由前端处理）
         return None
 
+    # 尝试从 resource_detail 取 VMF；取不到时保留 None
+    resource_detail = (equipment.get("attributes") or {}).get("resource_detail") or {}
+    vmf_raw = resource_detail.get("VMF") or resource_detail.get("vmf")
+    vmf = None
+    if vmf_raw is not None:
+        try:
+            vmf = int(vmf_raw)
+        except (ValueError, TypeError):
+            vmf = None
+
     return {
         "vid": rid,
         "resource_name": equipment.get("resource_name") or rid.replace("equipment:", ""),
@@ -2333,6 +2351,8 @@ def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[
         "display_name": VEHICLE_TYPE_DISPLAY_NAMES.get(vehicle_type, vehicle_type),
         "supported_action_types": VEHICLE_ACTION_TYPES.get(vehicle_type, []),
         "online_status": equipment.get("online_status") or "UNKNOWN",
+        "vmf": vmf,
+        "ip": resource_detail.get("ip") or equipment.get("ip") or "25.11.1.1",
         "is_mock": False,
     }
 
@@ -2385,6 +2405,15 @@ def query_online_vehicles_operator() -> List[Dict[str, Any]]:
         return result
     print("[AS-DEBUG] query_online_vehicles_operator: no vehicles from resource_pool, use fallback")
     return _build_fallback_vehicles()
+
+
+def get_online_vehicle_info_from_resource_pool(vid: str) -> Optional[Dict[str, Any]]:
+    """从资源池在线车辆列表中查找指定 vid 的信息（用于车辆控制服务缺失时的兜底）。"""
+    clean_vid = vid.replace("equipment:", "") if vid else vid
+    for v in query_online_vehicles_operator():
+        if v.get("vid", "").replace("equipment:", "") == clean_vid:
+            return v
+    return None
 
 
 # ==================== 操控席数据服务端接口 ====================

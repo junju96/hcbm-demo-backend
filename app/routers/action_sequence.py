@@ -39,6 +39,7 @@ from app.services.action_sequence_client import (
     sync_plan_to_operator,
     query_online_vehicles,
     query_online_vehicles_operator,
+    get_online_vehicle_info_from_resource_pool,
     delete_vehicle_operator,
     delete_vehicle,
     dispatch_plan_forward,
@@ -292,26 +293,82 @@ async def dispatch_plan(plan_id: str, body: DispatchRequest):
 
 @router.get("/action-sequences/operator/connected-vehicles", response_model=ApiResponse)
 async def list_connected_vehicles_operator():
-    """操控端 — 获取车辆控制服务当前已连接车辆列表"""
-    items = vehicle_control_client.get_all_vehicle_info()
+    """操控端 — 获取车辆控制服务当前已连接车辆列表。
+
+    车辆控制服务（28009）与资源池（28800）可能不同步，
+    因此以资源池 online 车辆为准做合并兜底，确保新上线车辆（如 HL01）能显示，
+    已下线车辆（如 XL01）不显示。
+    """
+    # 1) 车辆控制服务缓存（用于展示 VMF/IP 等实时信息）
+    control_items = vehicle_control_client.get_all_vehicle_info()
+    control_map = {}
+    for item in control_items:
+        vid = item.get("vid") or item.get("vehicle_id") or ""
+        if vid:
+            control_map[vid.replace("equipment:", "")] = item
+
+    # 2) 资源池在线车辆（权威在线状态）
+    resource_pool_items = query_online_vehicles_operator()
+    merged = []
+    seen = set()
+    for v in resource_pool_items:
+        vid = (v.get("vid") or "").replace("equipment:", "")
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        # 优先用车辆控制服务的实时信息，没有则用资源池信息兜底
+        control = control_map.get(vid)
+        if control:
+            merged.append({
+                "vid": f"equipment:{vid}",
+                "name": control.get("name") or v.get("display_name") or v.get("resource_name") or vid,
+                "resource_name": v.get("resource_name") or control.get("name") or vid,
+                "vmf": control.get("VMF") or control.get("vmf") or v.get("vmf"),
+                "ip": control.get("ip") or v.get("ip") or "25.11.1.1",
+            })
+        else:
+            merged.append({
+                "vid": f"equipment:{vid}",
+                "name": v.get("display_name") or v.get("resource_name") or vid,
+                "resource_name": v.get("resource_name") or vid,
+                "vmf": v.get("vmf"),
+                "ip": v.get("ip") or "25.11.1.1",
+            })
+
     selected = vehicle_control_client.get_selected_vehicle_id()
     return ApiResponse(data={
-        "items": items,
+        "items": merged,
         "selected": selected,
-        "total": len(items),
+        "total": len(merged),
     })
 
 
 @router.post("/action-sequences/operator/select-vehicle", response_model=ApiResponse)
 async def select_vehicle_operator(body: SelectVehicleRequest):
-    """操控端 — 选中一辆车并订阅 zenoh 反馈"""
+    """操控端 — 选中一辆车并订阅 zenoh 反馈。
+
+    车辆控制服务（28009）未同步时，以资源池在线车辆信息兜底，
+    避免新上线车辆（如 HL01）因不在车辆控制服务缓存中而无法被选中。
+    """
     vehicle_id = body.vehicle_id
+    clean_vid = vehicle_id.replace("equipment:", "")
     vehicle_control_client.refresh_vehicle_info()
     info = vehicle_control_client.get_vehicle_info(vehicle_id)
-    if not info:
-        return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
 
-    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
+    if not info:
+        # 车辆控制服务缓存缺失：尝试从资源池兜底并注入缓存
+        rp_info = get_online_vehicle_info_from_resource_pool(vehicle_id)
+        if not rp_info:
+            return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
+        info = vehicle_control_client.ensure_vehicle_info(
+            vehicle_id,
+            vmf=rp_info.get("vmf"),
+            ip=rp_info.get("ip") or "25.11.1.1",
+            name=rp_info.get("display_name") or rp_info.get("resource_name") or clean_vid,
+            vehicle_type=rp_info.get("resource_type"),
+        )
+
+    ok = zenoh_client.subscribe_vehicle_feedbacks(clean_vid)
     if ok:
         vehicle_control_client.set_selected_vehicle_id(vehicle_id)
         print(f"[AS-API-OP] selected vehicle: {vehicle_id}, subscribed feedbacks")

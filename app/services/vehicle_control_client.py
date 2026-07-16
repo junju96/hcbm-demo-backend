@@ -143,6 +143,32 @@ def get_all_vehicle_info() -> List[Dict[str, Any]]:
         return list(_VEHICLE_INFO_CACHE.values())
 
 
+def ensure_vehicle_info(
+    vehicle_id: str,
+    vmf: Optional[int] = None,
+    ip: Optional[str] = None,
+    name: Optional[str] = None,
+    vehicle_type: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """确保缓存中存在指定车辆信息（资源池兜底时注入）。返回该车辆缓存条目。"""
+    vid = _normalize_vehicle_id(vehicle_id)
+    with _CACHE_LOCK:
+        info = _VEHICLE_INFO_CACHE.get(vid)
+        if not info:
+            info = {"vehicle_id": vid, "vid": vid}
+            _VEHICLE_INFO_CACHE[vid] = info
+        if vmf is not None:
+            info["VMF"] = vmf
+            info["vmf"] = vmf
+        if ip is not None:
+            info["ip"] = ip
+        if name is not None:
+            info["name"] = name
+        if vehicle_type is not None:
+            info["type"] = vehicle_type
+        return info
+
+
 _SELECTED_VEHICLE_ID: Optional[str] = None
 
 
