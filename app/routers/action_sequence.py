@@ -39,7 +39,6 @@ from app.services.action_sequence_client import (
     sync_plan_to_operator,
     query_online_vehicles,
     query_online_vehicles_operator,
-    get_online_vehicle_info_from_resource_pool,
     delete_vehicle_operator,
     delete_vehicle,
     dispatch_plan_forward,
@@ -47,6 +46,7 @@ from app.services.action_sequence_client import (
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
 from app.services import vehicle_control_client
+from app.services import task_monitoring_client
 
 router = APIRouter()
 
@@ -293,82 +293,26 @@ async def dispatch_plan(plan_id: str, body: DispatchRequest):
 
 @router.get("/action-sequences/operator/connected-vehicles", response_model=ApiResponse)
 async def list_connected_vehicles_operator():
-    """操控端 — 获取车辆控制服务当前已连接车辆列表。
-
-    车辆控制服务（28009）与资源池（28800）可能不同步，
-    因此以资源池 online 车辆为准做合并兜底，确保新上线车辆（如 HL01）能显示，
-    已下线车辆（如 XL01）不显示。
-    """
-    # 1) 车辆控制服务缓存（用于展示 VMF/IP 等实时信息）
-    control_items = vehicle_control_client.get_all_vehicle_info()
-    control_map = {}
-    for item in control_items:
-        vid = item.get("vid") or item.get("vehicle_id") or ""
-        if vid:
-            control_map[vid.replace("equipment:", "")] = item
-
-    # 2) 资源池在线车辆（权威在线状态）
-    resource_pool_items = query_online_vehicles_operator()
-    merged = []
-    seen = set()
-    for v in resource_pool_items:
-        vid = (v.get("vid") or "").replace("equipment:", "")
-        if not vid or vid in seen:
-            continue
-        seen.add(vid)
-        # 优先用车辆控制服务的实时信息，没有则用资源池信息兜底
-        control = control_map.get(vid)
-        if control:
-            merged.append({
-                "vid": f"equipment:{vid}",
-                "name": control.get("name") or v.get("display_name") or v.get("resource_name") or vid,
-                "resource_name": v.get("resource_name") or control.get("name") or vid,
-                "vmf": control.get("VMF") or control.get("vmf") or v.get("vmf"),
-                "ip": control.get("ip") or v.get("ip") or "25.11.1.1",
-            })
-        else:
-            merged.append({
-                "vid": f"equipment:{vid}",
-                "name": v.get("display_name") or v.get("resource_name") or vid,
-                "resource_name": v.get("resource_name") or vid,
-                "vmf": v.get("vmf"),
-                "ip": v.get("ip") or "25.11.1.1",
-            })
-
+    """操控端 — 获取车辆控制服务当前已连接车辆列表"""
+    items = vehicle_control_client.get_all_vehicle_info()
     selected = vehicle_control_client.get_selected_vehicle_id()
     return ApiResponse(data={
-        "items": merged,
+        "items": items,
         "selected": selected,
-        "total": len(merged),
+        "total": len(items),
     })
 
 
 @router.post("/action-sequences/operator/select-vehicle", response_model=ApiResponse)
 async def select_vehicle_operator(body: SelectVehicleRequest):
-    """操控端 — 选中一辆车并订阅 zenoh 反馈。
-
-    车辆控制服务（28009）未同步时，以资源池在线车辆信息兜底，
-    避免新上线车辆（如 HL01）因不在车辆控制服务缓存中而无法被选中。
-    """
+    """操控端 — 选中一辆车并订阅 zenoh 反馈"""
     vehicle_id = body.vehicle_id
-    clean_vid = vehicle_id.replace("equipment:", "")
     vehicle_control_client.refresh_vehicle_info()
     info = vehicle_control_client.get_vehicle_info(vehicle_id)
-
     if not info:
-        # 车辆控制服务缓存缺失：尝试从资源池兜底并注入缓存
-        rp_info = get_online_vehicle_info_from_resource_pool(vehicle_id)
-        if not rp_info:
-            return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
-        info = vehicle_control_client.ensure_vehicle_info(
-            vehicle_id,
-            vmf=rp_info.get("vmf"),
-            ip=rp_info.get("ip") or "25.11.1.1",
-            name=rp_info.get("display_name") or rp_info.get("resource_name") or clean_vid,
-            vehicle_type=rp_info.get("resource_type"),
-        )
+        return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
 
-    ok = zenoh_client.subscribe_vehicle_feedbacks(clean_vid)
+    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
     if ok:
         vehicle_control_client.set_selected_vehicle_id(vehicle_id)
         print(f"[AS-API-OP] selected vehicle: {vehicle_id}, subscribed feedbacks")
@@ -445,6 +389,21 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
         return ApiResponse(code=500, message=f"Zenoh 下发失败: {err}", data={"topic": topic})
 
     print(f"[DISPATCH-OP] ====== 下发成功 ======\n")
+
+    # 下发成功后，向任务监控服务注册车辆+行动+路线，并做出发前预检冲突
+    monitoring_result = task_monitoring_client.register_mission_for_monitoring(
+        plan_id, vehicle_vid_clean, plan
+    )
+
+    # 若预检发现冲突，立即推送一次提醒
+    task_monitoring_client.send_warnings_if_any(
+        plan_id,
+        vehicle_vid_clean,
+        "/conflict/validate",
+        monitoring_result.get("route_validate"),
+        plan_name=plan.get("title"),
+    )
+
     return ApiResponse(data={
         "plan_id": plan_id,
         "action": "dispatch",
@@ -452,6 +411,7 @@ async def dispatch_plan_operator(plan_id: str, body: DispatchRequest):
         "vehicle_vid": vehicle_vid_clean,
         "mission_tid": payload["args"]["mission_data"]["task"]["tid"],
         "message": "任务已通过 Zenoh 下发",
+        "task_monitoring": monitoring_result,
     })
 
 
@@ -532,6 +492,15 @@ async def start_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(N
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
     zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1, vehicle_vid=vehicle_vid)
+
+    # Zenoh 控制指令下发成功后，启动任务监控轮询（每 5 秒上报一次绿色接口）
+    if zenoh_ok:
+        plan = get_plan_detail_operator(plan_id)
+        target_vid = vehicle_vid or get_first_vid(plan) if plan else vehicle_vid
+        target_vid_clean = target_vid.replace("equipment:", "") if target_vid else target_vid
+        if plan and target_vid_clean:
+            task_monitoring_client.start_monitoring(plan_id, target_vid_clean, plan)
+
     return ApiResponse(data={
         "plan_id": plan_id, "action": "start", "state": "ACTIVE", "message": msg,
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
@@ -569,6 +538,16 @@ async def stop_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(No
     """操控端 — 停止/重置 — Zenoh control_mission (task_control=4)"""
     action_runtime.reset(plan_id)
     zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=4, vehicle_vid=vehicle_vid)
+
+    # 停止对应任务监控轮询
+    target_vid = vehicle_vid
+    if not target_vid:
+        plan = get_plan_detail_operator(plan_id)
+        target_vid = get_first_vid(plan) if plan else None
+    target_vid_clean = target_vid.replace("equipment:", "") if target_vid else None
+    if target_vid_clean:
+        task_monitoring_client.stop_monitoring(plan_id, target_vid_clean)
+
     return ApiResponse(data={
         "plan_id": plan_id, "action": "stop", "state": "SCHEDULED",
         "message": "行动序列已停止并重置",
