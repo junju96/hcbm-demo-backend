@@ -237,6 +237,164 @@ def _plan_sort_key(item: Dict[str, Any]) -> Tuple[int, str]:
     return (1, plan_id)
 
 
+# ---------- action 时间参数默认值 ----------
+
+
+def _parse_duration_to_seconds(value: Any) -> int:
+    """把 HH:MM:SS、MM:SS 或秒数解析为整数秒；解析失败返回 0。"""
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return 0
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, s = int(parts[0]), int(parts[1]), int(float(parts[2]))
+            return h * 3600 + m * 60 + s
+        if len(parts) == 2:
+            m, s = int(parts[0]), int(float(parts[1]))
+            return m * 60 + s
+        return int(float(text))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _format_duration(seconds: int) -> str:
+    """把秒数格式化为 HH:MM:SS。"""
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _parse_start_time(value: Any) -> Optional[datetime]:
+    """解析时间字符串为 aware datetime；失败返回 None。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts >= 1_000_000_000:
+            try:
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+            except Exception:
+                return None
+        return None
+    fmts = [
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ]
+    for fmt in fmts:
+        try:
+            dt = datetime.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def _format_start_time(dt: datetime) -> str:
+    """把 datetime 格式化为带时区的 ISO 字符串。"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _collect_vehicles_from_team_actions(team_actions: Any) -> List[Dict[str, Any]]:
+    """统一提取 stage.team_actions 中的车辆列表。"""
+    vehicles: List[Dict[str, Any]] = []
+    if isinstance(team_actions, dict):
+        for vlist in team_actions.values():
+            if isinstance(vlist, list):
+                vehicles.extend(vlist)
+    elif isinstance(team_actions, list):
+        for ta in team_actions:
+            if not isinstance(ta, dict):
+                continue
+            vehicles.extend(ta.get("car_actions", []) or [])
+            vehicles.extend(ta.get("team_actions", []) or [])
+            if ta.get("vid") and ta.get("actions") is not None:
+                vehicles.append(ta)
+    return vehicles
+
+
+def _normalize_action_timing(plan: Dict[str, Any]) -> None:
+    """
+    确保每个 action 的 start_time / mission_duration 不为 0。
+
+    - 没有前序任务（同一车辆的首个 action）：start_time 取 plan 创建时间，mission_duration 默认 10 秒。
+    - 有前序任务：start_time = 前序任务 start_time + 前序任务 mission_duration。
+    - 已有有效值时保持不动；仅对缺失或 0 值进行填充。
+    """
+    if not isinstance(plan, dict):
+        return
+
+    base_time = _parse_start_time(plan.get("created_at") or plan.get("updated_at"))
+    if base_time is None:
+        base_time = datetime.now(timezone.utc)
+
+    # 按车辆聚合所有 action，key = (stage_seq, action_seq)
+    vehicle_actions: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
+    for stage in plan.get("stages", []) or []:
+        if not isinstance(stage, dict):
+            continue
+        stage_seq = stage.get("stage_seq", 0) or 0
+        for vehicle in _collect_vehicles_from_team_actions(stage.get("team_actions")):
+            if not isinstance(vehicle, dict):
+                continue
+            vid = str(vehicle.get("vid", ""))
+            if not vid:
+                continue
+            for action in vehicle.get("actions", []) or []:
+                if not isinstance(action, dict):
+                    continue
+                action_seq = action.get("action_seq", 0) or 0
+                vehicle_actions.setdefault(vid, []).append((stage_seq, action_seq, action))
+
+    for vid, items in vehicle_actions.items():
+        items.sort(key=lambda x: (x[0], x[1]))
+        prev_end: Optional[datetime] = None
+        for stage_seq, action_seq, action in items:
+            param = action.setdefault("param", {})
+            if not isinstance(param, dict):
+                continue
+
+            # mission_duration：缺失或为 0 时默认 10 秒
+            duration_sec = _parse_duration_to_seconds(param.get("mission_duration"))
+            if duration_sec <= 0:
+                duration_sec = 10
+            param["mission_duration"] = _format_duration(duration_sec)
+
+            # start_time：缺失或为 0 时基于前序任务推导
+            start_dt = _parse_start_time(param.get("start_time"))
+            if start_dt is None:
+                start_dt = prev_end if prev_end is not None else base_time
+            param["start_time"] = _format_start_time(start_dt)
+            param["enable_start_time"] = True
+
+            prev_end = start_dt + timedelta(seconds=duration_sec)
+
+
 def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
     """查询行动方案列表 — 调用数据服务器 POST /resources/query（静默模式，不打印日志）。
     数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
@@ -2624,6 +2782,9 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     if "lifecycle" not in plan:
         plan["lifecycle"] = {"state": "DRAFT", "created_at": now, "updated_at": now}
 
+    # 确保每个 action 的 start_time / mission_duration 有有效默认值
+    _normalize_action_timing(plan)
+
     # 尝试导入数据服务器；失败或不可达则仅保存本地
     try:
         import_plan_to_operator(plan)
@@ -2650,6 +2811,8 @@ def update_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[
             existing[key] = copy.deepcopy(value)
 
     existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # 确保每个 action 的 start_time / mission_duration 有有效默认值
+    _normalize_action_timing(existing)
     # 标记本地 plan 已被修改但尚未成功同步到数据服务器
     existing["local_dirty"] = True
     task_pool.set(rid, existing)
@@ -2817,6 +2980,8 @@ def sync_plan_to_data_server(
     plan = task_pool.get(rid)
     if not plan:
         return False
+    # 同步前确保时间参数有效，避免数据服务器保存空/0 值
+    _normalize_action_timing(plan)
     try:
         payload = {
             "resource_id": rid,
