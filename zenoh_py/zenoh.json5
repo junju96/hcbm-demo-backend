@@ -2,7 +2,7 @@
   mode: "client",
   connect: {
     endpoints: [
-      "tcp/25.11.1.2:7447"
+      "tcp/25.11.1.147:7447"
     ]
   },
   listen: {

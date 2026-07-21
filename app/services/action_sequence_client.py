@@ -63,7 +63,10 @@ def _infer_resource_type_from_vid(vid: str) -> str:
     return ""
 
 
-def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_car_actions_from_plan(
+    plan: Dict[str, Any],
+    http_post=_http_post,
+) -> List[Dict[str, Any]]:
     """
     将 plan.stages[].team_actions 转换为按车辆(vid)组织的行动序列列表。
     兼容三种数据结构：
@@ -72,6 +75,9 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
       - 旧 Mock 数据: team_actions 为 dict{"team_id": [...]}
     当 plan.stages[].team_actions 中 actions 为空（数据服务器 /simple 投影丢失）时，
     尝试按 plan_id + vid 从数据服务器查询 CAR_ACTIONS 资源补全。
+
+    http_post 参数用于指定调用哪个数据服务器：默认 _http_post（协同席数据服务器），
+    操控席调用时应传入 _http_post_operator，避免席位数据串用。
     """
     plan_id = plan.get("plan_id", "")
     stages = plan.get("stages", [])
@@ -134,7 +140,7 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     if missing_queries:
         try:
             print(f"[AS-DEBUG] _build_car_actions_from_plan try to query CAR_ACTIONS for plan_id={plan_id}, missing_vids={[q[4] for q in missing_queries]}")
-            car_actions_data = _http_post(
+            car_actions_data = http_post(
                 "/api/v1/task_pool/resources/query",
                 {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
                 silent=True,
@@ -167,7 +173,7 @@ def _build_car_actions_from_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
                 ]
                 print(f"[AS-DEBUG] vids_need_action_query={vids_need_action_query}")
                 if vids_need_action_query:
-                    action_resources = _http_post(
+                    action_resources = http_post(
                         "/api/v1/task_pool/resources/query",
                         {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
                         silent=True,
@@ -2769,7 +2775,7 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
     plan = _scale_coords_to_float(plan)
 
-    car_actions = _build_car_actions_from_plan(plan)
+    car_actions = _build_car_actions_from_plan(plan, http_post=_http_post_operator)
     result = _to_frontend_plan(plan, car_actions)
     # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
     action_runtime.init_state_from_plan(plan_id, result)
