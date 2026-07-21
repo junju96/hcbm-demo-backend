@@ -1,6 +1,6 @@
 """
 车辆控制服务客户端
-维护从 vehicle_control_service (默认 http://25.11.1.178:28009) 获取的在线车辆信息缓存。
+维护从 vehicle_control_service (默认 http://25.11.1.2:28430) 获取的在线车辆信息缓存。
 
 职责：
   1. 提供 query_vehicle_info_all() 拉取 /vehicle/info/all
@@ -23,7 +23,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
+VEHICLE_CONTROL_BASE_URL = "http://25.11.1.2:28430"
 VEHICLE_INFO_ALL_PATH = "/vehicle/info/all"
 DEFAULT_REFRESH_INTERVAL_SECONDS = 30
 
