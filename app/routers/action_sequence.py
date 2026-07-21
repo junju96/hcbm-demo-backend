@@ -74,8 +74,8 @@ class SelectVehicleRequest(BaseModel):
 
 @router.get("/action-sequences/connected-vehicles", response_model=ApiResponse)
 async def list_connected_vehicles():
-    """获取车辆控制服务当前已连接车辆列表（用于操控席选择车辆）"""
-    items = vehicle_control_client.get_all_vehicle_info()
+    """获取当前已连接车辆列表（从数据服务器资源池查询，用于操控席选择车辆）"""
+    items = query_online_vehicles()
     selected = vehicle_control_client.get_selected_vehicle_id()
     return ApiResponse(data={
         "items": items,
@@ -84,11 +84,21 @@ async def list_connected_vehicles():
     })
 
 
+def _find_online_vehicle_by_id(vehicle_id: str, online_vehicles: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """在数据服务器返回的在线车辆列表中按 vid 查找（兼容 equipment: 前缀）。"""
+    target = (vehicle_id or "").replace("equipment:", "")
+    for v in online_vehicles:
+        vid = str(v.get("vid", "")).replace("equipment:", "")
+        if vid and vid == target:
+            return v
+    return None
+
+
 @router.get("/action-sequences/selected-vehicle", response_model=ApiResponse)
 async def get_selected_vehicle():
-    """获取当前已选中的车辆"""
+    """获取当前已选中的车辆（从数据服务器资源池查询车辆信息）"""
     selected = vehicle_control_client.get_selected_vehicle_id()
-    info = vehicle_control_client.get_selected_vehicle_info()
+    info = _find_online_vehicle_by_id(selected, query_online_vehicles()) if selected else None
     return ApiResponse(data={
         "selected": selected,
         "info": info,
@@ -97,16 +107,14 @@ async def get_selected_vehicle():
 
 @router.post("/action-sequences/select-vehicle", response_model=ApiResponse)
 async def select_vehicle(body: SelectVehicleRequest):
-    """选中一辆车：刷新缓存、订阅该车辆 zenoh 反馈、记录选中状态"""
+    """选中一辆车：从数据服务器确认在线后订阅 zenoh 反馈、记录选中状态"""
     vehicle_id = body.vehicle_id
-    # 先刷新一次车辆信息，确保车辆当前在线
-    vehicle_control_client.refresh_vehicle_info()
-    info = vehicle_control_client.get_vehicle_info(vehicle_id)
+    clean_vid = vehicle_id.replace("equipment:", "")
+    info = _find_online_vehicle_by_id(vehicle_id, query_online_vehicles())
     if not info:
         return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
 
-    # 订阅该车辆反馈
-    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
+    ok = zenoh_client.subscribe_vehicle_feedbacks(clean_vid)
     if ok:
         vehicle_control_client.set_selected_vehicle_id(vehicle_id)
         print(f"[AS-API] selected vehicle: {vehicle_id}, subscribed feedbacks")
@@ -293,8 +301,8 @@ async def dispatch_plan(plan_id: str, body: DispatchRequest):
 
 @router.get("/action-sequences/operator/connected-vehicles", response_model=ApiResponse)
 async def list_connected_vehicles_operator():
-    """操控端 — 获取车辆控制服务当前已连接车辆列表"""
-    items = vehicle_control_client.get_all_vehicle_info()
+    """操控端 — 从数据服务器资源池获取当前已连接车辆列表"""
+    items = query_online_vehicles_operator()
     selected = vehicle_control_client.get_selected_vehicle_id()
     return ApiResponse(data={
         "items": items,
@@ -307,12 +315,12 @@ async def list_connected_vehicles_operator():
 async def select_vehicle_operator(body: SelectVehicleRequest):
     """操控端 — 选中一辆车并订阅 zenoh 反馈"""
     vehicle_id = body.vehicle_id
-    vehicle_control_client.refresh_vehicle_info()
-    info = vehicle_control_client.get_vehicle_info(vehicle_id)
+    clean_vid = vehicle_id.replace("equipment:", "")
+    info = _find_online_vehicle_by_id(vehicle_id, query_online_vehicles_operator())
     if not info:
         return ApiResponse(code=404, message=f"车辆 {vehicle_id} 不在线或未找到", data=None)
 
-    ok = zenoh_client.subscribe_vehicle_feedbacks(vehicle_id.replace("equipment:", ""))
+    ok = zenoh_client.subscribe_vehicle_feedbacks(clean_vid)
     if ok:
         vehicle_control_client.set_selected_vehicle_id(vehicle_id)
         print(f"[AS-API-OP] selected vehicle: {vehicle_id}, subscribed feedbacks")
