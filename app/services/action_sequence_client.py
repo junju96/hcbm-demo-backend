@@ -2690,6 +2690,19 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
             local_actions = _count_actions(local_plan)
             remote_actions = _count_actions(remote_plan)
 
+            # 比较状态进度：数据服务器上的 plan 已经进入更靠后的生命周期时，
+            # 优先使用远程数据，避免本地旧缓存覆盖 ACTIVE/DONE 等真实状态。
+            def _state_progress(state: str) -> int:
+                return {
+                    "SCHEDULED": 0,
+                    "ACTIVE": 1,
+                    "PAUSED": 2,
+                    "DONE": 3,
+                }.get(state, 0)
+
+            local_state_progress = _state_progress(local_plan.get("state")) if local_plan else 0
+            remote_state_progress = _state_progress(remote_plan.get("state"))
+
             # 额外比较车辆集合：删除整辆车后 actions 数量必然减少，但不能因此回退到远程旧数据。
             def _collect_vids(p):
                 vids = set()
@@ -2727,9 +2740,19 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
                 # 车辆集合发生变化（增删车辆），优先使用本地编辑结果
                 print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (vids changed: local={sorted(local_vids)}, remote={sorted(remote_vids)}), plan_id={plan_id}")
                 plan = local_plan
-            elif local_plan and local_actions >= remote_actions:
-                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} >= remote={remote_actions}), plan_id={plan_id}")
+            elif remote_state_progress > local_state_progress:
+                # 远程 plan 状态更靠后（如 ACTIVE/DONE），优先使用远程真实状态
+                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_state_progress={remote_state_progress} > local={local_state_progress}), plan_id={plan_id}")
+                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
+                task_pool.set(rid, plan)
+            elif local_plan and local_actions > remote_actions:
+                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} > remote={remote_actions}), plan_id={plan_id}")
                 plan = local_plan
+            elif local_plan and local_actions == remote_actions:
+                # actions 数量相同且状态进度相同，优先使用远程最新数据
+                print(f"[AS-DEBUG] get_plan_detail_operator use remote (actions equal={local_actions}, state equal), plan_id={plan_id}")
+                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
+                task_pool.set(rid, plan)
             else:
                 print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}, vids_equal={vids_equal}), plan_id={plan_id}")
                 # 用远程结构，但保留本地有效的 action.param 列表数据
