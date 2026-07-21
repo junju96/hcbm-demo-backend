@@ -313,14 +313,21 @@ def _extract_anomalies(
 
 
 def _warning_signature(source: str, detection_type: DetectionType, synthetic: Dict[str, Any]) -> str:
+    """
+    生成预警去重签名。
+
+    业务规则：
+      - 任务超时（TASK_TIMEOUT）和路线偏离（ROUTE_DEVIATION）这两类提示信息，
+        在同一个 plan/vehicle 的一次执行周期内只上报一次；plan 结束或中断后
+        通过 stop_monitoring -> clear_warning_signatures 重置。
+      - 路线冲突类保持原有细粒度签名，避免遗漏不同时间/不同车辆对的冲突。
+    """
     if detection_type == DetectionType.TASK_TIMEOUT:
         vid = list(synthetic["vehicles"].keys())[0]
-        warning = synthetic["vehicles"][vid]["timeout_warnings"][0]
-        return (
-            f"timeout:{vid}:"
-            f"{warning.get('action_seq', warning.get('action_id', '')):}"
-            f"{warning.get('expected_end_time', '')}"
-        )
+        return f"task_deviation:{vid}"
+
+    if detection_type == DetectionType.ROUTE_DEVIATION:
+        return f"route_deviation:{synthetic.get('vehicle_id', '')}"
 
     if detection_type == DetectionType.ROUTE_CONFLICT_PRECHECK:
         interval = synthetic["conflict_intervals"][0]
@@ -331,9 +338,6 @@ def _warning_signature(source: str, detection_type: DetectionType, synthetic: Di
         interval = synthetic["warnings"][0]["conflict_intervals"][0]
         pair = sorted([str(interval.get("vehicle_a", "")), str(interval.get("vehicle_b", ""))])
         return f"realtime:{pair[0]}:{pair[1]}:{interval.get('t_start', '')}:{interval.get('t_end', '')}"
-
-    if detection_type == DetectionType.ROUTE_DEVIATION:
-        return f"deviation:{synthetic.get('vehicle_id', '')}:{synthetic.get('matched_segment_index', '')}"
 
     return f"{source}:{json.dumps(synthetic, ensure_ascii=False, sort_keys=True)}"
 
@@ -418,13 +422,17 @@ def send_warnings_if_any(
         signature = _warning_signature(source, detection_type, synthetic)
         with _warning_lock:
             if signature in sent:
+                _log(
+                    "DEBUG",
+                    f"warning already sent, skip: plan={plan_id} "
+                    f"vehicle={vehicle_id} signature={signature}",
+                )
                 continue
+            # 无论后续发送是否成功，同一类 warning 在本次 plan 执行周期内只尝试一次
+            sent.add(signature)
 
         text = detection_result_to_text(detection_type, synthetic, plan_name=plan_name)
-        send_result = _send_warning(plan_id, vehicle_id, warning_type, action_ids, text)
-        if send_result.get("ok"):
-            with _warning_lock:
-                sent.add(signature)
+        _send_warning(plan_id, vehicle_id, warning_type, action_ids, text)
 
 
 # ---------- 黄色接口：任务下发成功后调用 ----------
