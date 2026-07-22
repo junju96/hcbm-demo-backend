@@ -150,6 +150,14 @@ class TaskPool:
                 committed.append(key)
         return {"committed": committed, "count": len(committed)}
 
+    def clear(self) -> Dict[str, Any]:
+        """清空所有本地缓存数据"""
+        count = len(self._store)
+        self._store.clear()
+        self._index_by_type.clear()
+        self._pending.clear()
+        return {"cleared": count}
+
 
 # 全局单例
 task_pool = TaskPool()

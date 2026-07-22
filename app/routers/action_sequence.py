@@ -561,3 +561,14 @@ async def stop_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(No
         "message": "行动序列已停止并重置",
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
     })
+
+
+@router.post("/action-sequences/local/clear", response_model=ApiResponse)
+async def clear_local_task_pool():
+    """清空本地 task_pool 缓存（开发调试用）"""
+    result = task_pool.clear()
+    return ApiResponse(data={
+        "action": "clear_local_task_pool",
+        "cleared": result.get("cleared", 0),
+        "message": f"已清空本地 task_pool，共 {result.get('cleared', 0)} 条记录",
+    })
