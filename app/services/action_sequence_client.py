@@ -173,6 +173,14 @@ def _build_car_actions_from_plan(
                 ]
                 print(f"[AS-DEBUG] vids_need_action_query={vids_need_action_query}")
                 if vids_need_action_query:
+                    # 收集每个 vid 需要的 action_ids（ACTION 资源可能不含 vid 字段，需按 action_id 匹配）
+                    vid_to_needed_ids = {}
+                    needed_action_ids = set()
+                    for vid in vids_need_action_query:
+                        ids = vid_to_action_ids.get(vid, [])
+                        vid_to_needed_ids[vid] = set(ids)
+                        needed_action_ids.update(ids)
+
                     action_resources = http_post(
                         "/api/v1/task_pool/resources/query",
                         {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
@@ -181,19 +189,30 @@ def _build_car_actions_from_plan(
                     )
                     print(f"[AS-DEBUG] ACTION query returned type={type(action_resources)}, len={len(action_resources) if isinstance(action_resources, list) else 'N/A'}")
                     if isinstance(action_resources, list):
-                        vid_to_action_list = {}
+                        # 优先按 vid 匹配；ACTION 资源不含 vid 字段时退回到按 action_id 匹配
+                        action_by_vid = {}
+                        action_by_id = {}
                         for a in action_resources:
                             a_vid = a.get("vid", "")
-                            if a_vid in vids_need_action_query:
-                                vid_to_action_list.setdefault(a_vid, []).append(a)
-                        for vid, actions in vid_to_action_list.items():
-                            actions.sort(key=lambda x: x.get("action_seq") or 0)
-                            vid_to_best_actions[vid] = actions
+                            if a_vid:
+                                action_by_vid.setdefault(a_vid, []).append(a)
+                            aid = a.get("action_id")
+                            if aid:
+                                action_by_id[aid] = a
+
+                        for vid, needed_ids in vid_to_needed_ids.items():
+                            matched = action_by_vid.get(vid)
+                            if not matched:
+                                matched = [action_by_id[aid] for aid in needed_ids if aid in action_by_id]
+                            if matched:
+                                matched.sort(key=lambda x: x.get("action_seq") or 0)
+                                vid_to_best_actions[vid] = matched
 
                 for item in results:
                     if item.get("vid") in vid_to_best_actions and not item.get("actions"):
-                        # 数据服务器返回的整数坐标转回浮点
-                        item["actions"] = _scale_coords_to_float(vid_to_best_actions[item["vid"]])
+                        # 数据服务器返回的整数坐标转回浮点；同时归一化 action_name -> name 等字段
+                        filled = _scale_coords_to_float(vid_to_best_actions[item["vid"]])
+                        item["actions"] = _normalize_plan_field_names(filled)
                         print(f"[AS-DEBUG] filled actions for vid={item.get('vid')} from CAR_ACTIONS/ACTION, len={len(item['actions'])}")
         except Exception as e:
             print(f"[AS-DEBUG] query CAR_ACTIONS failed: {e}")
