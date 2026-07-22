@@ -2605,7 +2605,7 @@ def get_online_vehicle_info_from_resource_pool(vid: str) -> Optional[Dict[str, A
 
 def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
     """向操控席数据服务器查询行动方案列表 — POST /resources/query（静默模式）。
-    服务端不可达或为空时回退本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
+    任务列表直接从数据服务器拉取，不使用本地缓存/假数据。"""
     data = _http_post_operator(
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
@@ -2622,24 +2622,6 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
         print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
     else:
         print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
-
-    # 合并本地 fake 调测方案（FAKE_ACTION_SEQUENCE_LOCAL_001），方便本地调试。
-    # TODO: 后续删除本地假数据逻辑时，移除此段合并代码。
-    local_items = task_pool.query(task_type="PLAN", limit=limit)
-    FAKE_PLAN_ID = "FAKE_ACTION_SEQUENCE_LOCAL_001"
-    if not items:
-        print("[AS-DEBUG] query_plans_operator fallback to local task_pool")
-        items = local_items
-    else:
-        server_ids = {
-            (item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""))
-            for item in items
-        }
-        for local_item in local_items:
-            local_id = local_item.get("plan_id") or local_item.get("resource_id", "").replace("plan:", "")
-            # 仅合并本地 fake 调测方案，不要把真实 plan 的本地缓存插入列表
-            if local_id == FAKE_PLAN_ID and local_id not in server_ids:
-                items.insert(0, local_item)
 
     items.sort(key=_plan_sort_key)
 
@@ -2669,129 +2651,16 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
 
 
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
-    """向操控席数据服务器获取方案详情（静默模式）；不可达时回退本地 task_pool。
-    注意：操控席本地编辑后的 plan 优先于数据服务器缓存，避免 PATCH 后被旧数据覆盖。"""
+    """向操控席数据服务器获取方案详情（静默模式）。
+    任务详情直接从数据服务器拉取，不使用本地缓存。"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    # 1) 优先检查本地 task_pool 是否已有该 plan（操控席本地编辑过）
-    local_plan = task_pool.get(rid)
-
     data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
-    if data is not None and isinstance(data, dict):
-        remote_plan = _normalize_plan_field_names(data)
-
-        # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本，
-        # 避免删除/编辑后 actions 数量变少，被数据服务器旧缓存覆盖。
-        # local_dirty 由 sync_plan_to_operator 在同步成功后清除。
-        if local_plan and local_plan.get("local_dirty"):
-            print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool because local_dirty=true, plan_id={plan_id}")
-            plan = local_plan
-        else:
-            # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本。
-            # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整假数据/编辑数据。
-            def _count_actions(p):
-                if not p or not isinstance(p, dict):
-                    return 0
-                count = 0
-                for stage in p.get("stages", []) or []:
-                    team_actions = stage.get("team_actions", {})
-                    if isinstance(team_actions, dict):
-                        for vlist in team_actions.values():
-                            if isinstance(vlist, list):
-                                for v in vlist:
-                                    if isinstance(v, dict):
-                                        count += len(v.get("actions") or [])
-                    elif isinstance(team_actions, list):
-                        for ta in team_actions:
-                            if not isinstance(ta, dict):
-                                continue
-                            for v in ta.get("car_actions", []) or []:
-                                if isinstance(v, dict):
-                                    count += len(v.get("actions") or [])
-                            for v in ta.get("team_actions", []) or []:
-                                if isinstance(v, dict):
-                                    count += len(v.get("actions") or [])
-                return count
-
-            local_actions = _count_actions(local_plan)
-            remote_actions = _count_actions(remote_plan)
-
-            # 比较状态进度：数据服务器上的 plan 已经进入更靠后的生命周期时，
-            # 优先使用远程数据，避免本地旧缓存覆盖 ACTIVE/DONE 等真实状态。
-            def _state_progress(state: str) -> int:
-                return {
-                    "SCHEDULED": 0,
-                    "ACTIVE": 1,
-                    "PAUSED": 2,
-                    "DONE": 3,
-                }.get(state, 0)
-
-            local_state_progress = _state_progress(local_plan.get("state")) if local_plan else 0
-            remote_state_progress = _state_progress(remote_plan.get("state"))
-
-            # 额外比较车辆集合：删除整辆车后 actions 数量必然减少，但不能因此回退到远程旧数据。
-            def _collect_vids(p):
-                vids = set()
-                if not p or not isinstance(p, dict):
-                    return vids
-                for stage in p.get("stages", []) or []:
-                    if not isinstance(stage, dict):
-                        continue
-                    team_actions = stage.get("team_actions", {})
-                    if isinstance(team_actions, dict):
-                        for vlist in team_actions.values():
-                            for v in vlist or []:
-                                if isinstance(v, dict) and v.get("vid"):
-                                    vids.add(v["vid"])
-                    elif isinstance(team_actions, list):
-                        for ta in team_actions:
-                            if not isinstance(ta, dict):
-                                continue
-                            for v in ta.get("car_actions", []) or []:
-                                if isinstance(v, dict) and v.get("vid"):
-                                    vids.add(v["vid"])
-                            for v in ta.get("team_actions", []) or []:
-                                if isinstance(v, dict) and v.get("vid"):
-                                    vids.add(v["vid"])
-                for v in p.get("vehicle_summary", []) or []:
-                    if isinstance(v, dict) and v.get("vid"):
-                        vids.add(v["vid"])
-                return vids
-
-            local_vids = _collect_vids(local_plan)
-            remote_vids = _collect_vids(remote_plan)
-            vids_equal = local_vids == remote_vids
-
-            if local_plan and not vids_equal:
-                # 车辆集合发生变化（增删车辆），优先使用本地编辑结果
-                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (vids changed: local={sorted(local_vids)}, remote={sorted(remote_vids)}), plan_id={plan_id}")
-                plan = local_plan
-            elif remote_state_progress > local_state_progress:
-                # 远程 plan 状态更靠后（如 ACTIVE/DONE），优先使用远程真实状态
-                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_state_progress={remote_state_progress} > local={local_state_progress}), plan_id={plan_id}")
-                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
-                task_pool.set(rid, plan)
-            elif local_plan and local_actions > remote_actions:
-                print(f"[AS-DEBUG] get_plan_detail_operator use local task_pool (actions={local_actions} > remote={remote_actions}), plan_id={plan_id}")
-                plan = local_plan
-            elif local_plan and local_actions == remote_actions:
-                # actions 数量相同且状态进度相同，优先使用远程最新数据
-                print(f"[AS-DEBUG] get_plan_detail_operator use remote (actions equal={local_actions}, state equal), plan_id={plan_id}")
-                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
-                task_pool.set(rid, plan)
-            else:
-                print(f"[AS-DEBUG] get_plan_detail_operator use remote (remote_actions={remote_actions} > local={local_actions}, vids_equal={vids_equal}), plan_id={plan_id}")
-                # 用远程结构，但保留本地有效的 action.param 列表数据
-                plan = _merge_plan_keep_local_params(local_plan or remote_plan, remote_plan)
-                task_pool.set(rid, plan)
-    else:
-        print(f"[AS-DEBUG] get_plan_detail_operator fallback to local task_pool, plan_id={plan_id}")
-        plan = local_plan
-
-    if plan is None:
+    if data is None or not isinstance(data, dict):
+        print(f"[AS-DEBUG] get_plan_detail_operator: plan not found or data server unreachable, plan_id={plan_id}")
         return None
 
-    # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
+    plan = _normalize_plan_field_names(data)
     plan = _scale_coords_to_float(plan)
 
     car_actions = _build_car_actions_from_plan(plan, http_post=_http_post_operator)
