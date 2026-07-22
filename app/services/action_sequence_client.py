@@ -119,10 +119,10 @@ def _build_car_actions_from_plan(
                     continue
                 vid = vehicle.get("vid", "")
                 actions = vehicle.get("actions", [])
+                ca_id = vehicle.get("car_actions_id") or f"ca:{plan_id}:{stage_id}:{vid}"
                 # 如果该 vehicle 的 actions 为空，标记后续从 CAR_ACTIONS 补全
                 if vid and not actions:
-                    missing_queries.append((stage_id, stage_seq, stage_title, team_id, vid))
-                ca_id = f"ca:{plan_id}:{stage_id}:{vid}"
+                    missing_queries.append((stage_id, stage_seq, stage_title, team_id, vid, ca_id, vehicle.get("action_ids") or []))
                 results.append({
                     "car_actions_id": ca_id,
                     "vid": vid,
@@ -136,7 +136,7 @@ def _build_car_actions_from_plan(
                     "action_type": vehicle.get("action_type", ""),
                 })
 
-    # 按 plan_id + vid 查询 CAR_ACTIONS / ACTION 资源补全 actions
+    # 按 plan_id 查询 CAR_ACTIONS / ACTION 资源补全 actions（按 car_actions_id 精确匹配，避免跨阶段串用）
     if missing_queries:
         try:
             print(f"[AS-DEBUG] _build_car_actions_from_plan try to query CAR_ACTIONS for plan_id={plan_id}, missing_vids={[q[4] for q in missing_queries]}")
@@ -148,39 +148,31 @@ def _build_car_actions_from_plan(
             )
             print(f"[AS-DEBUG] CAR_ACTIONS query returned type={type(car_actions_data)}, len={len(car_actions_data) if isinstance(car_actions_data, list) else 'N/A'}")
             if isinstance(car_actions_data, list):
-                # 先收集每个 vid 下 action_ids 最长的 CAR_ACTIONS，以及 actions 非空的最长子集
-                vid_to_action_ids = {}
-                vid_to_best_actions = {}
+                # 建立 car_actions_id -> actions / action_ids 映射，按资源精确匹配而不是按 vid 汇总
+                ca_id_to_actions = {}
+                ca_id_to_action_ids = {}
                 for ca in car_actions_data:
-                    ca_vid = ca.get("vid", "")
+                    ca_id = ca.get("car_actions_id", "")
+                    if not ca_id:
+                        continue
                     ca_actions = ca.get("actions", [])
                     ca_action_ids = ca.get("action_ids", [])
-                    print(f"[AS-DEBUG] CAR_ACTIONS item vid={ca_vid}, actions_len={len(ca_actions)}, action_ids_len={len(ca_action_ids)}")
-                    if not ca_vid:
-                        continue
-                    current_ids = vid_to_action_ids.get(ca_vid, [])
-                    if len(ca_action_ids) > len(current_ids):
-                        vid_to_action_ids[ca_vid] = ca_action_ids
+                    print(f"[AS-DEBUG] CAR_ACTIONS item ca_id={ca_id}, vid={ca.get('vid')}, actions_len={len(ca_actions)}, action_ids_len={len(ca_action_ids)}")
                     if ca_actions:
-                        current = vid_to_best_actions.get(ca_vid)
-                        if current is None or len(ca_actions) > len(current):
-                            vid_to_best_actions[ca_vid] = ca_actions
+                        ca_id_to_actions[ca_id] = ca_actions
+                    if ca_action_ids:
+                        ca_id_to_action_ids[ca_id] = ca_action_ids
 
-                # 对 actions 为空但 action_ids 非空的 vid，批量查询 ACTION 资源补全
-                vids_need_action_query = [
-                    vid for vid in vid_to_action_ids
-                    if (not vid_to_best_actions.get(vid)) and vid_to_action_ids.get(vid)
-                ]
-                print(f"[AS-DEBUG] vids_need_action_query={vids_need_action_query}")
-                if vids_need_action_query:
-                    # 收集每个 vid 需要的 action_ids（ACTION 资源可能不含 vid 字段，需按 action_id 匹配）
-                    vid_to_needed_ids = {}
-                    needed_action_ids = set()
-                    for vid in vids_need_action_query:
-                        ids = vid_to_action_ids.get(vid, [])
-                        vid_to_needed_ids[vid] = set(ids)
-                        needed_action_ids.update(ids)
+                # 收集所有需要查询 ACTION 的 action_ids（CAR_ACTIONS 中 actions 为空但 action_ids 非空的）
+                needed_action_ids = set()
+                for _, _, _, _, _, ca_id, action_ids in missing_queries:
+                    if ca_id not in ca_id_to_actions and ca_id in ca_id_to_action_ids:
+                        needed_action_ids.update(ca_id_to_action_ids[ca_id])
+                    elif ca_id not in ca_id_to_actions and action_ids:
+                        needed_action_ids.update(action_ids)
 
+                action_by_id = {}
+                if needed_action_ids:
                     action_resources = http_post(
                         "/api/v1/task_pool/resources/query",
                         {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
@@ -189,31 +181,36 @@ def _build_car_actions_from_plan(
                     )
                     print(f"[AS-DEBUG] ACTION query returned type={type(action_resources)}, len={len(action_resources) if isinstance(action_resources, list) else 'N/A'}")
                     if isinstance(action_resources, list):
-                        # 优先按 vid 匹配；ACTION 资源不含 vid 字段时退回到按 action_id 匹配
-                        action_by_vid = {}
-                        action_by_id = {}
                         for a in action_resources:
-                            a_vid = a.get("vid", "")
-                            if a_vid:
-                                action_by_vid.setdefault(a_vid, []).append(a)
                             aid = a.get("action_id")
                             if aid:
                                 action_by_id[aid] = a
 
-                        for vid, needed_ids in vid_to_needed_ids.items():
-                            matched = action_by_vid.get(vid)
-                            if not matched:
-                                matched = [action_by_id[aid] for aid in needed_ids if aid in action_by_id]
+                # 按每个 (stage_id, vid) 对应的 car_actions_id 精确补全
+                for item in results:
+                    if item.get("actions"):
+                        continue
+                    ca_id = item.get("car_actions_id")
+                    if not ca_id:
+                        continue
+                    filled = ca_id_to_actions.get(ca_id)
+                    if not filled:
+                        # CAR_ACTIONS 中 actions 为空，按 action_ids 从 ACTION 资源补全
+                        ids = ca_id_to_action_ids.get(ca_id, [])
+                        if not ids:
+                            # 从 missing_queries 中拿到原始 action_ids
+                            for mq in missing_queries:
+                                if mq[5] == ca_id and mq[6]:
+                                    ids = mq[6]
+                                    break
+                        if ids:
+                            matched = [action_by_id[aid] for aid in ids if aid in action_by_id]
                             if matched:
                                 matched.sort(key=lambda x: x.get("action_seq") or 0)
-                                vid_to_best_actions[vid] = matched
-
-                for item in results:
-                    if item.get("vid") in vid_to_best_actions and not item.get("actions"):
-                        # 数据服务器返回的整数坐标转回浮点；同时归一化 action_name -> name 等字段
-                        filled = _scale_coords_to_float(vid_to_best_actions[item["vid"]])
-                        item["actions"] = _normalize_plan_field_names(filled)
-                        print(f"[AS-DEBUG] filled actions for vid={item.get('vid')} from CAR_ACTIONS/ACTION, len={len(item['actions'])}")
+                                filled = matched
+                    if filled:
+                        item["actions"] = _normalize_plan_field_names(_scale_coords_to_float(filled))
+                        print(f"[AS-DEBUG] filled actions for ca_id={ca_id} vid={item.get('vid')} stage={item.get('stage_id')}, len={len(item['actions'])}")
         except Exception as e:
             print(f"[AS-DEBUG] query CAR_ACTIONS failed: {e}")
             pass
@@ -2549,7 +2546,11 @@ def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
         params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
         silent=True,
     )
-    items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+    items = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("items") or data.get("data") or []
 
     # 2) 没有 online 车辆时，尝试获取全部 equipment（可能资源池未标记在线状态）
     if not items:
@@ -2558,7 +2559,11 @@ def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
             params={"entity_kind": "equipment", "limit": 100},
             silent=True,
         )
-        items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("items") or data.get("data") or []
 
     result = []
     for item in items:
