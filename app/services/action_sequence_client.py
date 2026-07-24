@@ -2903,7 +2903,12 @@ def sync_plan_to_data_server(
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
     plan = task_pool.get(rid)
     if not plan:
-        return False
+        # 本地无缓存时，从数据服务器拉取后再同步，保证 sync 接口始终可用
+        remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+        if remote is None or not isinstance(remote, dict):
+            return False
+        plan = _normalize_plan_field_names(remote)
+        task_pool.set(rid, plan)
     # 同步前确保时间参数有效，避免数据服务器保存空/0 值
     _normalize_action_timing(plan)
     try:
