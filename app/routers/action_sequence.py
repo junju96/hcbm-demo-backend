@@ -44,7 +44,13 @@ from app.services.action_sequence_client import (
     delete_vehicle,
     dispatch_plan_forward,
     PLAN_SSE_SCOPE,
+    _http_get_operator,
+    _http_post_operator,
+    _http_patch_operator,
+    _normalize_plan_field_names,
+    _scale_coords_to_int,
 )
+from datetime import datetime, timezone
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
 from app.services import vehicle_control_client
@@ -463,11 +469,41 @@ async def delete_vehicle_from_plan(plan_id: str, vid: str):
 
 @router.patch("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
 async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
-    """操控端 — 仅更新本地 task_pool 中的方案，不同步到数据服务器"""
-    saved = update_operator_plan_locally(plan_id, body)
-    if not saved:
+    """操控端 — 更新方案字段并保存到操控席数据服务器（直接调用数据服务器 PATCH，避免 /simple 投影丢失 stages）"""
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+
+    # 1. 先检查 plan 是否存在
+    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    if data is None or not isinstance(data, dict):
         return ApiResponse(code=404, message="Plan not found", data=None)
-    return ApiResponse(data=saved)
+
+    # 2. 只提取允许更新的字段，映射为数据服务器字段名
+    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text", "car_actions", "vehicle_summary"}
+    key_map = {
+        "title": "plan_title",
+        "description": "plan_description",
+    }
+    payload = {}
+    for key, value in body.items():
+        if key in allowed_top_keys:
+            payload[key_map.get(key, key)] = value
+    if not payload:
+        return ApiResponse(code=400, message="没有可更新的字段", data=None)
+
+    # 3. 直接调用数据服务器 PATCH 接口，只更新指定字段，不影响 stages 等嵌套数据
+    result = _http_patch_operator(
+        f"/api/v1/task_pool/resources/{rid}",
+        payload,
+        silent=True,
+    )
+    if result is None:
+        return ApiResponse(code=500, message="保存到数据服务器失败", data=None)
+
+    # 4. 返回更新后的 plan 详情
+    updated = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    if updated is None or not isinstance(updated, dict):
+        return ApiResponse(code=500, message="保存成功但获取更新后数据失败", data=None)
+    return ApiResponse(data=_normalize_plan_field_names(updated))
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/vehicles/{vid}/delete", response_model=ApiResponse)

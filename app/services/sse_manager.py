@@ -104,7 +104,8 @@ class SSEManager:
                 # 发送心跳
                 now = datetime.now(timezone.utc).isoformat()
                 yield f"event: system.heartbeat\ndata: {json.dumps({'timestamp': now}, ensure_ascii=False)}\n\n"
-            except Exception:
+            except Exception as e:
+                print(f"[SSE] event_generator error: {e}")
                 break
 
     # ---------- 清理 ----------
