@@ -469,7 +469,7 @@ async def delete_vehicle_from_plan(plan_id: str, vid: str):
 
 @router.patch("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
 async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
-    """操控端 — 更新方案字段并保存到操控席数据服务器（直接调用数据服务器 PATCH，避免 /simple 投影丢失 stages）"""
+    """操控端 — 更新方案并保存到操控席数据服务器（使用 import 全量保存，确保 stages/team_actions 落盘）"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
     # 1. 先检查 plan 是否存在
@@ -477,23 +477,18 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     if data is None or not isinstance(data, dict):
         return ApiResponse(code=404, message="Plan not found", data=None)
 
-    # 2. 只提取允许更新的字段，映射为数据服务器字段名
-    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text", "car_actions", "vehicle_summary"}
-    key_map = {
-        "title": "plan_title",
-        "description": "plan_description",
-    }
-    payload = {}
-    for key, value in body.items():
-        if key in allowed_top_keys:
-            payload[key_map.get(key, key)] = value
-    if not payload:
-        return ApiResponse(code=400, message="没有可更新的字段", data=None)
+    # 2. 使用请求体作为完整 plan 数据，确保包含 stages/team_actions
+    # 前端发送的请求体已经是完整 plan 结构，直接使用
+    plan = _normalize_plan_field_names(body)
+    plan["resource_id"] = rid
+    plan["task_type"] = "PLAN"
+    plan["plan_id"] = plan_id
+    plan["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    # 3. 直接调用数据服务器 PATCH 接口，只更新指定字段，不影响 stages 等嵌套数据
-    result = _http_patch_operator(
-        f"/api/v1/task_pool/resources/{rid}",
-        payload,
+    # 3. 使用 import 接口全量保存，确保 stages/team_actions 等嵌套数据正确落盘
+    result = _http_post_operator(
+        "/api/v1/task_pool/ingestion/import",
+        {"resources": [_scale_coords_to_int(plan)], "return_data_type": "typed", "ignore_errors": True},
         silent=True,
     )
     if result is None:
