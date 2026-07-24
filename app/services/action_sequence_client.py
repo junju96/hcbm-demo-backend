@@ -13,6 +13,7 @@
 
 import copy
 import hashlib
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from app.services.data_server_client import (
 from app.services.task_pool import task_pool
 from app.services import zenoh_client
 from app.services import vehicle_control_client
+from app.services.sse_manager import sse_manager
 
 
 def _infer_resource_type_from_vid(vid: str) -> str:
@@ -3123,5 +3125,71 @@ def dispatch_plan_forward(plan_id: str, target_ips: List[str], timeout_seconds: 
     if result is None:
         return {"ok": False, "error": "调用数据服务器 /ingestion/forward 失败"}
     return {"ok": True, "plan_id": plan_id, "target_ips": target_ips, "forward_result": result}
+
+
+# ==================== Zenoh plan 变化通知订阅 ====================
+
+PLAN_UPDATE_TOPIC = "op/pool/task/plan/update"
+PLAN_COUNT_TOPIC = "op/pool/task/plan/count"
+PLAN_SSE_SCOPE = "action_sequence"
+
+
+def _push_plan_sse_event(event: str, data: Dict[str, Any]) -> None:
+    """向 SSE 队列推送 plan 变化事件（线程安全，供 Zenoh 回调调用）。"""
+    queues = sse_manager._overview_queues.get(PLAN_SSE_SCOPE, [])
+    msg = {"event": event, "data": data}
+    for q in list(queues):
+        try:
+            q.put_nowait(msg)
+        except Exception:
+            pass
+
+
+def _parse_zenoh_payload(message: Dict[str, Any]) -> Dict[str, Any]:
+    """从 Zenoh 消息中解析 payload，兼容 payload_text / payload 字段。"""
+    payload = message.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    text = message.get("payload_text") or ""
+    if isinstance(payload, str) and not text:
+        text = payload
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def _on_plan_update(message: Dict[str, Any]) -> None:
+    """处理 plan 内容变化通知：payload = {"plan_id": "<id>"}"""
+    payload = _parse_zenoh_payload(message)
+    plan_id = payload.get("plan_id")
+    if not plan_id:
+        return
+    print(f"[AS-ZENOH] plan update received: plan_id={plan_id}")
+    _push_plan_sse_event("action_sequence.plan.updated", {"plan_id": plan_id})
+
+
+def _on_plan_count(message: Dict[str, Any]) -> None:
+    """处理 plan 数量增删通知：payload = {"plan_id": "<id>", "operation": "add"|"delete"}"""
+    payload = _parse_zenoh_payload(message)
+    plan_id = payload.get("plan_id")
+    operation = payload.get("operation")
+    if not plan_id or operation not in ("add", "delete"):
+        return
+    print(f"[AS-ZENOH] plan count received: plan_id={plan_id}, operation={operation}")
+    _push_plan_sse_event("action_sequence.plan.count_changed", {"plan_id": plan_id, "operation": operation})
+
+
+def init_plan_change_subscription() -> bool:
+    """订阅 plan 变化 Zenoh 主题，收到通知后通过 SSE 推送给前端。"""
+    ok1 = zenoh_client.subscribe(PLAN_UPDATE_TOPIC, on_message=_on_plan_update)
+    ok2 = zenoh_client.subscribe(PLAN_COUNT_TOPIC, on_message=_on_plan_count)
+    if ok1 and ok2:
+        print(f"[AS-ZENOH] subscribed plan change topics: {PLAN_UPDATE_TOPIC}, {PLAN_COUNT_TOPIC}")
+    else:
+        print(f"[AS-ZENOH] subscribe plan change topics failed: update={ok1}, count={ok2}")
+    return ok1 and ok2
 
 

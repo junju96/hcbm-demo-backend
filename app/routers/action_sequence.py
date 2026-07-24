@@ -15,7 +15,8 @@
 """
 
 from typing import Any, Dict, List
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import StreamingResponse
 
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
@@ -42,11 +43,13 @@ from app.services.action_sequence_client import (
     delete_vehicle_operator,
     delete_vehicle,
     dispatch_plan_forward,
+    PLAN_SSE_SCOPE,
 )
 from app.services import zenoh_client
 from app.services.task_pool import task_pool
 from app.services import vehicle_control_client
 from app.services import task_monitoring_client
+from app.services.sse_manager import sse_manager
 
 router = APIRouter()
 
@@ -572,3 +575,16 @@ async def clear_local_task_pool():
         "cleared": result.get("cleared", 0),
         "message": f"已清空本地 task_pool，共 {result.get('cleared', 0)} 条记录",
     })
+
+
+@router.get("/action-sequences/events")
+async def action_sequence_events(request: Request):
+    """行动序列 SSE 事件流：推送 plan 内容变化和数量增删通知"""
+    q = sse_manager.register_overview(PLAN_SSE_SCOPE)
+
+    async def generate():
+        async for chunk in sse_manager.event_generator(q):
+            yield chunk
+        sse_manager.unregister_overview(PLAN_SSE_SCOPE, q)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
