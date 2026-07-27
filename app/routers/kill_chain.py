@@ -824,7 +824,7 @@ async def task_pool_query(body: Dict[str, Any]):
 
     # PLAN 类型：从数据服务器查询（不再使用本地 mock）
     if task_type == "PLAN":
-        ds_data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=True)
+        ds_data = _http_get("/api/v1/task_pool/resources/by_type/PLAN", silent=False)
         items = []
         if ds_data is not None:
             if isinstance(ds_data, list):

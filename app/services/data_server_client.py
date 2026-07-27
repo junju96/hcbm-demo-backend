@@ -5,6 +5,7 @@
 
 import json
 import copy
+import os
 import uuid
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
@@ -14,6 +15,9 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+# 数据服务器 HTTP 日志默认全部打开，便于排查问题
+DS_HTTP_DEBUG = True
 
 # ========== 配置 ==========
 
@@ -53,16 +57,17 @@ def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) ->
     if not HAS_REQUESTS:
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[DS-OUT] GET  {url} | params={params}")
         resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[DS-ERR] GET  {url} | error={e}")
         return None
 
@@ -72,16 +77,17 @@ def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[DS-OUT] POST {url} | body={body_summary}")
         resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[DS-ERR] POST {url} | error={e}")
         return None
 
@@ -91,16 +97,17 @@ def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = Fals
         return None
     url = f"{DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[DS-OUT] PATCH {url} | body={body_summary}")
         resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[DS-ERR] PATCH {url} | error={e}")
         return None
 
@@ -271,16 +278,17 @@ def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = 
     if not HAS_REQUESTS:
         return None
     url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[OP-DS-OUT] GET  {url} | params={params}")
         resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[OP-DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[OP-DS-ERR] GET  {url} | error={e}")
         return None
 
@@ -310,16 +318,17 @@ def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: boo
         return None
     url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[OP-DS-OUT] POST {url} | body={body_summary}")
         resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[OP-DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[OP-DS-ERR] POST {url} | error={e}")
         return None
 
@@ -330,15 +339,16 @@ def _http_patch_operator(path: str, json_body: Optional[Dict] = None, silent: bo
         return None
     url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
+    debug = not silent or DS_HTTP_DEBUG
     try:
-        if not silent:
+        if debug:
             print(f"[OP-DS-OUT] PATCH {url} | body={body_summary}")
         resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
-        if not silent:
+        if debug:
             print(f"[OP-DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        if not silent:
+        if debug:
             print(f"[OP-DS-ERR] PATCH {url} | error={e}")
         return None

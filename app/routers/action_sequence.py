@@ -473,7 +473,7 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
     # 1. 先检查 plan 是否存在
-    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if data is None or not isinstance(data, dict):
         return ApiResponse(code=404, message="Plan not found", data=None)
 
@@ -489,13 +489,13 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     result = _http_post_operator(
         "/api/v1/task_pool/ingestion/import",
         {"resources": [_scale_coords_to_int(plan)], "return_data_type": "typed", "ignore_errors": True},
-        silent=True,
+        silent=False,
     )
     if result is None:
         return ApiResponse(code=500, message="保存到数据服务器失败", data=None)
 
     # 4. 返回更新后的 plan 详情
-    updated = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    updated = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if updated is None or not isinstance(updated, dict):
         return ApiResponse(code=500, message="保存成功但获取更新后数据失败", data=None)
     return ApiResponse(data=_normalize_plan_field_names(updated))

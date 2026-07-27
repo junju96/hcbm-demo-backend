@@ -145,7 +145,7 @@ def _build_car_actions_from_plan(
             car_actions_data = http_post(
                 "/api/v1/task_pool/resources/query",
                 {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
-                silent=True,
+                silent=False,
                 timeout=(1, 5),
             )
             if isinstance(car_actions_data, list) and car_actions_data:
@@ -163,7 +163,7 @@ def _build_car_actions_from_plan(
                         action_resources = http_post(
                             "/api/v1/task_pool/resources/query",
                             {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
-                            silent=True,
+                            silent=False,
                             timeout=(1, 10),
                         )
                         if isinstance(action_resources, list):
@@ -215,7 +215,7 @@ def _build_car_actions_from_plan(
             car_actions_data = http_post(
                 "/api/v1/task_pool/resources/query",
                 {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
-                silent=True,
+                silent=False,
                 timeout=(1, 5),
             )
             print(f"[AS-DEBUG] CAR_ACTIONS query returned type={type(car_actions_data)}, len={len(car_actions_data) if isinstance(car_actions_data, list) else 'N/A'}")
@@ -248,7 +248,7 @@ def _build_car_actions_from_plan(
                     action_resources = http_post(
                         "/api/v1/task_pool/resources/query",
                         {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
-                        silent=True,
+                        silent=False,
                         timeout=(1, 10),
                     )
                     print(f"[AS-DEBUG] ACTION query returned type={type(action_resources)}, len={len(action_resources) if isinstance(action_resources, list) else 'N/A'}")
@@ -495,7 +495,7 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
     data = _http_post(
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
-        silent=True,
+        silent=False,
         timeout=(1, 10),
     )
     items = []
@@ -560,7 +560,7 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if data is not None and isinstance(data, dict):
         # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
         plan = _normalize_plan_field_names(data)
@@ -1201,7 +1201,7 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
     # 1. 确保本地 task_pool 中有该 plan 的缓存
     plan = task_pool.get(rid)
     if plan is None:
-        data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+        data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
         if data is not None and isinstance(data, dict):
             plan = _normalize_plan_field_names(data)
             plan = _scale_coords_to_float(plan)
@@ -1274,7 +1274,7 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
     # 1. 确保本地 task_pool 中有该 plan 的缓存
     plan = task_pool.get(rid)
     if plan is None:
-        data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+        data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
         if data is not None and isinstance(data, dict):
             plan = _normalize_plan_field_names(data)
             plan = _scale_coords_to_float(plan)
@@ -2616,7 +2616,7 @@ def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
     data = _http_get_resource_pool(
         "/api/v1/resource_pool/resources",
         params={"is_online": "true", "entity_kind": "equipment", "limit": 100},
-        silent=True,
+        silent=False,
     )
     items = []
     if isinstance(data, list):
@@ -2629,7 +2629,7 @@ def _fetch_vehicles_from_resource_pool() -> List[Dict[str, Any]]:
         data = _http_get_resource_pool(
             "/api/v1/resource_pool/resources",
             params={"entity_kind": "equipment", "limit": 100},
-            silent=True,
+            silent=False,
         )
         items = []
         if isinstance(data, list):
@@ -2686,7 +2686,7 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
     data = _http_post_operator(
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
-        silent=True,
+        silent=False,
         timeout=(1, 30),
     )
     items = []
@@ -2732,7 +2732,7 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     任务详情直接从数据服务器拉取，不使用本地缓存。"""
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+    data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if data is None or not isinstance(data, dict):
         print(f"[AS-DEBUG] get_plan_detail_operator: plan not found or data server unreachable, plan_id={plan_id}")
         return None
@@ -2974,7 +2974,7 @@ def sync_plan_to_data_server(
     plan = task_pool.get(rid)
     if not plan:
         # 本地无缓存时，从数据服务器拉取后再同步，保证 sync 接口始终可用
-        remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+        remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
         if remote is None or not isinstance(remote, dict):
             return False
         plan = _normalize_plan_field_names(remote)
@@ -2998,14 +2998,14 @@ def sync_plan_to_data_server(
         result = http_post(
             "/api/v1/task_pool/ingestion/import",
             {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
-            silent=True,
+            silent=False,
         )
         if result is None:
             return False
         # 同步成功后拉取数据服务器最新数据并更新本地缓存，但保留本地有效的 action.param，
         # 避免 /simple 接口投影丢失 area/points 等列表参数后把本地数据覆盖成空/0。
         try:
-            remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=True)
+            remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
             if remote is not None and isinstance(remote, dict):
                 normalized = _normalize_plan_field_names(remote)
                 # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
@@ -3050,7 +3050,7 @@ def _cascade_delete_resource(
         resp = http_post(
             f"/api/v1/task_pool/resources/{resource_id}/delete",
             {"cascade": True},
-            silent=True,
+            silent=False,
         )
         if resp is not None and isinstance(resp, dict):
             return resp
