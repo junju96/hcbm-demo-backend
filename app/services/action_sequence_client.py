@@ -490,8 +490,8 @@ def _normalize_action_timing(plan: Dict[str, Any]) -> None:
 
 
 def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 调用数据服务器 POST /resources/query（静默模式，不打印日志）。
-    数据服务器不可达或为空时，回退到本地 task_pool；本地 fake 调测方案合并到列表最前（调试用）。"""
+    """查询行动方案列表 — 调用数据服务器 POST /resources/query。
+    任务列表直接从数据服务器拉取，不使用本地缓存/假数据。"""
     data = _http_post(
         "/api/v1/task_pool/resources/query",
         {"task_type": "PLAN", "limit": limit},
@@ -504,24 +504,6 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
     elif data is not None and isinstance(data, dict):
         # /retrieval/query 返回 { items: [...] }
         items = (data.get("items") or data.get("data") or [])[:limit]
-
-    # 合并本地 fake 调测方案（FAKE_ACTION_SEQUENCE_LOCAL_001），方便本地调试。
-    # TODO: 后续删除本地假数据逻辑时，移除此段合并代码。
-    local_items = task_pool.query(task_type="PLAN", limit=limit)
-    FAKE_PLAN_ID = "FAKE_ACTION_SEQUENCE_LOCAL_001"
-    if not items:
-        print("[AS-DEBUG] query_plans fallback to local task_pool")
-        items = local_items
-    else:
-        server_ids = {
-            (item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""))
-            for item in items
-        }
-        for local_item in local_items:
-            local_id = local_item.get("plan_id") or local_item.get("resource_id", "").replace("plan:", "")
-            # 仅合并本地 fake 调测方案，不要把真实 plan 的本地缓存插入列表
-            if local_id == FAKE_PLAN_ID and local_id not in server_ids:
-                items.insert(0, local_item)
 
     items.sort(key=_plan_sort_key)
 
