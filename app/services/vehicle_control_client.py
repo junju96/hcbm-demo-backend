@@ -23,7 +23,10 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-VEHICLE_CONTROL_BASE_URL = "http://25.11.1.2:28430"
+# /vehicle/info/all 使用独立服务地址（上游车辆管理服务）
+VEHICLE_INFO_ALL_BASE_URL = "http://25.11.1.147:28410"
+# 其他接口（/user/current、/health 等）仍使用原车辆控制服务地址
+VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
 VEHICLE_INFO_ALL_PATH = "/vehicle/info/all"
 DEFAULT_REFRESH_INTERVAL_SECONDS = 30
 
@@ -41,10 +44,10 @@ def _normalize_vehicle_id(vehicle_id: str) -> str:
 
 
 def query_vehicle_info_all(
-    base_url: str = VEHICLE_CONTROL_BASE_URL,
+    base_url: str = VEHICLE_INFO_ALL_BASE_URL,
     timeout: int = 5,
 ) -> Optional[List[Dict[str, Any]]]:
-    """向车辆控制服务查询所有车辆信息，返回原始数组"""
+    """向上游车辆管理服务查询所有车辆信息，返回原始数组"""
     if not HAS_REQUESTS:
         print("[VC-DEBUG] requests not available")
         return None

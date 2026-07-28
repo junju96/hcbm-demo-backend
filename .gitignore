@@ -25,3 +25,4 @@ serverlog.txt
 # IDE
 .vscode/
 .idea/
+backend-28600.pid
