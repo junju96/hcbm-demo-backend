@@ -543,70 +543,13 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
     data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
-    if data is not None and isinstance(data, dict):
-        # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
-        plan = _normalize_plan_field_names(data)
-
-        local_plan = task_pool.get(rid)
-
-        # 本地 plan 有未同步的修改（local_dirty）时，无条件优先使用本地版本。
-        # local_dirty 由 sync_plan_to_operator 在同步成功后清除，避免删除/编辑后
-        # 第二次 get detail 被数据服务器旧缓存覆盖。
-        if local_plan and local_plan.get("local_dirty"):
-            print(f"[AS-DEBUG] get_plan_detail use local task_pool because local_dirty=true, plan_id={plan_id}")
-            plan = local_plan
-        else:
-            # 比较本地和远程 plan 的 actions 数量，优先使用 actions 更完整的版本，
-            # 避免数据服务器 /simple 接口投影丢失 team_actions 后覆盖本地完整数据。
-            def _count_actions(p):
-                if not p or not isinstance(p, dict):
-                    return 0
-                count = 0
-                for stage in p.get("stages", []) or []:
-                    team_actions = stage.get("team_actions", {})
-                    if isinstance(team_actions, dict):
-                        for vlist in team_actions.values():
-                            if isinstance(vlist, list):
-                                for v in vlist:
-                                    if isinstance(v, dict):
-                                        count += len(v.get("actions") or [])
-                    elif isinstance(team_actions, list):
-                        for ta in team_actions:
-                            if not isinstance(ta, dict):
-                                continue
-                            for v in ta.get("car_actions", []) or []:
-                                if isinstance(v, dict):
-                                    count += len(v.get("actions") or [])
-                            for v in ta.get("team_actions", []) or []:
-                                if isinstance(v, dict):
-                                    count += len(v.get("actions") or [])
-                return count
-
-            local_actions = _count_actions(local_plan)
-            remote_actions = _count_actions(plan)
-            # 如果本地 task_pool 中有该 plan，且本地 actions 不为 0，优先使用本地；
-            # 否则尝试远程（即使远程 /simple 接口 actions 看起来更多，也可能因投影丢失而不完整，
-            # 后续 _build_car_actions_from_plan 会通过 CAR_ACTIONS 资源补全）。
-            if local_plan and local_actions > 0:
-                print(f"[AS-DEBUG] get_plan_detail use local task_pool (actions={local_actions} > 0), plan_id={plan_id}")
-                plan = local_plan
-            else:
-                print(f"[AS-DEBUG] get_plan_detail use remote (remote_actions={remote_actions}, local_actions={local_actions}), plan_id={plan_id}")
-                plan = _merge_plan_keep_local_params(local_plan, plan)
-
-        # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
-        plan = _scale_coords_to_float(plan)
-
-        # 同步缓存到本地 task_pool，方便后续 PATCH 更新
-        task_pool.set(rid, plan)
-    else:
-        # 服务器不可达时 fallback 到本地 task_pool（支持 fake 调测数据）
-        print(f"[AS-DEBUG] get_plan_detail fallback to local task_pool, plan_id={plan_id}")
-        plan = task_pool.get(rid)
-
-    if plan is None:
-        print(f"[AS-DEBUG] plan={plan_id} not found in data_server or local task_pool")
+    if data is None or not isinstance(data, dict):
+        print(f"[AS-DEBUG] plan={plan_id} not found in data_server")
         return None
+
+    # 数据服务端 /simple 接口返回的是业务字段（已做字段投影）
+    plan = _normalize_plan_field_names(data)
+    plan = _scale_coords_to_float(plan)
 
     # 本地缓存中的坐标已为浮点，确保反缩放（对浮点无影响）
     plan = _scale_coords_to_float(plan)
@@ -2512,52 +2455,6 @@ def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
 _online_vehicle_type_cache: Dict[str, str] = {}
 
 
-def _build_fallback_vehicles() -> List[Dict[str, Any]]:
-    """资源池不可达时的本地调试 fallback：返回五型无人车。"""
-    return [
-        {
-            "vid": "equipment:recon-strike-01",
-            "resource_name": "侦打车-01",
-            "resource_type": "Recon-Strike-UGV",
-            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Recon-Strike-UGV"],
-            "supported_action_types": VEHICLE_ACTION_TYPES["Recon-Strike-UGV"],
-            "is_mock": True,
-        },
-        {
-            "vid": "equipment:fire-support-01",
-            "resource_name": "火力车-01",
-            "resource_type": "Fire-Support-UGV",
-            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Fire-Support-UGV"],
-            "supported_action_types": VEHICLE_ACTION_TYPES["Fire-Support-UGV"],
-            "is_mock": True,
-        },
-        {
-            "vid": "equipment:patrol-01",
-            "resource_name": "巡逻车-01",
-            "resource_type": "Patrol-UGV",
-            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Patrol-UGV"],
-            "supported_action_types": VEHICLE_ACTION_TYPES["Patrol-UGV"],
-            "is_mock": True,
-        },
-        {
-            "vid": "equipment:electronic-01",
-            "resource_name": "电磁车-01",
-            "resource_type": "Electronic-UGV",
-            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Electronic-UGV"],
-            "supported_action_types": VEHICLE_ACTION_TYPES["Electronic-UGV"],
-            "is_mock": True,
-        },
-        {
-            "vid": "equipment:air-ground-01",
-            "resource_name": "空地车-01",
-            "resource_type": "Air-Ground-UAV",
-            "display_name": VEHICLE_TYPE_DISPLAY_NAMES["Air-Ground-UAV"],
-            "supported_action_types": VEHICLE_ACTION_TYPES["Air-Ground-UAV"],
-            "is_mock": True,
-        },
-    ]
-
-
 def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """把资源池 equipment 记录转换为前端需要的 vehicle 结构。"""
     rid = equipment.get("resource_id", "")
@@ -2632,13 +2529,13 @@ def query_online_vehicles() -> List[Dict[str, Any]]:
     """从资源池查询当前已连接（online）的无人车列表。
 
     资源池服务独立部署在 28800 端口（与 task_pool 28801 区分）。
-    资源池不可达或没有可识别车辆时返回本地调试 fallback 车辆列表。
+    资源池不可达或没有可识别车辆时返回空列表。
     """
     result = _fetch_vehicles_from_resource_pool()
     if result:
         return result
-    print("[AS-DEBUG] query_online_vehicles: no vehicles from resource_pool, use fallback")
-    return _build_fallback_vehicles()
+    print("[AS-DEBUG] query_online_vehicles: no vehicles from resource_pool")
+    return []
 
 
 def query_online_vehicles_operator() -> List[Dict[str, Any]]:
@@ -2646,8 +2543,8 @@ def query_online_vehicles_operator() -> List[Dict[str, Any]]:
     result = _fetch_vehicles_from_resource_pool()
     if result:
         return result
-    print("[AS-DEBUG] query_online_vehicles_operator: no vehicles from resource_pool, use fallback")
-    return _build_fallback_vehicles()
+    print("[AS-DEBUG] query_online_vehicles_operator: no vehicles from resource_pool")
+    return []
 
 
 def get_online_vehicle_info_from_resource_pool(vid: str) -> Optional[Dict[str, Any]]:

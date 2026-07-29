@@ -13,7 +13,6 @@ from app.routers import kill_chain, planning, action_sequence, ssl, zenoh as zen
 from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
 from app.services import zenoh_client
-from app.data.mock_data import preload_mock_data
 from app.services import vehicle_control_client
 from app.services.action_sequence_client import init_plan_change_subscription
 
@@ -21,8 +20,6 @@ from app.services.action_sequence_client import init_plan_change_subscription
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 启动时预置 mock 数据
-    preload_mock_data(task_pool)
     app.state.task_pool = task_pool
     app.state.sse_manager = sse_manager
 
