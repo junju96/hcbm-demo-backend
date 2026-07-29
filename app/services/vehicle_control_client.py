@@ -23,10 +23,8 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-# /vehicle/info/all 使用独立服务地址（上游车辆管理服务）
-VEHICLE_INFO_ALL_BASE_URL = "http://25.11.1.147:28410"
-# 其他接口（/user/current、/health 等）仍使用原车辆控制服务地址
-VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
+# 服务地址统一定义在 app/config.py 中，便于查找和修改
+from app.config import VEHICLE_INFO_ALL_BASE_URL, VEHICLE_CONTROL_BASE_URL
 VEHICLE_INFO_ALL_PATH = "/vehicle/info/all"
 DEFAULT_REFRESH_INTERVAL_SECONDS = 30
 

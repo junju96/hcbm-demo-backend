@@ -20,10 +20,12 @@ except ImportError:
 DS_HTTP_DEBUG = True
 
 # ========== 配置 ==========
-
-DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
-OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.56:28801"  # 操控席数据服务端
-RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"  # 资源池重构版服务端口
+# 服务地址统一定义在 app/config.py 中，便于查找和修改
+from app.config import (
+    DATA_SERVER_BASE_URL,
+    OPERATOR_DATA_SERVER_BASE_URL,
+    RESOURCE_POOL_BASE_URL,
+)
 TIMEOUT_SECONDS = (1, 2)  # (connect timeout, read timeout)；连接 1s、读取 2s，断连时快速失败
 MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
 
