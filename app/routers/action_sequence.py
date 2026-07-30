@@ -49,6 +49,8 @@ from app.services.action_sequence_client import (
     _http_patch_operator,
     _normalize_plan_field_names,
     _scale_coords_to_int,
+    _scale_coords_to_float,
+    _merge_plan_keep_local_params,
 )
 from datetime import datetime, timezone
 from app.services import zenoh_client
@@ -498,7 +500,18 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     updated = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if updated is None or not isinstance(updated, dict):
         return ApiResponse(code=500, message="保存成功但获取更新后数据失败", data=None)
-    return ApiResponse(data=_normalize_plan_field_names(updated))
+    normalized = _normalize_plan_field_names(updated)
+
+    # 5. 同步更新本地 task_pool 缓存：否则后续 /sync 会把编辑前的旧缓存
+    # 重新 import 回数据服务器，导致本次删除/修改被旧数据覆盖（"复活"）
+    try:
+        local_fresh = _merge_plan_keep_local_params(plan, _scale_coords_to_float(normalized))
+        local_fresh["local_dirty"] = False
+        task_pool.set(rid, local_fresh)
+    except Exception as e:
+        print(f"[PATCH-OP-PLAN] update local cache failed: {e}, plan_id={plan_id}")
+
+    return ApiResponse(data=normalized)
 
 
 @router.post("/action-sequences/operator/plans/{plan_id}/vehicles/{vid}/delete", response_model=ApiResponse)

@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from app.services import vehicle_control_client
+from app.services.data_server_client import _http_get_resource_pool
 from app.services.natural_language import DetectionType, detection_result_to_text
 
 
@@ -563,25 +563,42 @@ def report_action_status(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any
 
 
 def _get_vehicle_position(vehicle_id: str) -> Optional[Dict[str, float]]:
-    """从车辆控制服务缓存读取车辆当前位置。"""
+    """从资源池服务（28800）GET /api/v1/resource_pool/resources/simple
+    读取 platforms.motion_status 作为车辆当前位置。"""
     vid = _clean_vid(vehicle_id)
-    info = vehicle_control_client.get_vehicle_info(vid)
-    if info is None:
-        vehicle_control_client.refresh_vehicle_info()
-        info = vehicle_control_client.get_vehicle_info(vid)
-    if not info:
+    data = _http_get_resource_pool("/api/v1/resource_pool/resources/simple", silent=True)
+    items = data if isinstance(data, list) else []
+
+    target = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get("resource_id") or "")
+        item_vid = str(item.get("vid") or "")
+        if item_vid == vid or rid in (vid, f"equipment:{vid}"):
+            target = item
+            break
+    if not target:
+        _log("WARN", f"资源池中未找到车辆 vehicle={vid}")
         return None
 
-    lat = info.get("lat") or info.get("latitude")
-    lon = info.get("lon") or info.get("longitude")
-    heading = info.get("heading") or info.get("heading_deg")
-    speed = info.get("speed") or info.get("speed_ms")
+    motion = None
+    for platform in target.get("platforms") or []:
+        if isinstance(platform, dict) and isinstance(platform.get("motion_status"), dict):
+            motion = platform["motion_status"]
+            break
+    if not motion:
+        _log("WARN", f"资源池车辆无 motion_status vehicle={vid}")
+        return None
+
+    lat = motion.get("latitude", motion.get("lat"))
+    lon = motion.get("longitude", motion.get("lon"))
     try:
         return {
             "lat": float(lat) if lat is not None else 0.0,
             "lon": float(lon) if lon is not None else 0.0,
-            "heading_deg": float(heading) if heading is not None else 0.0,
-            "speed_ms": float(speed) if speed is not None else 0.0,
+            "heading_deg": float(motion.get("heading") or 0.0),
+            "speed_ms": float(motion.get("speed") or 0.0),
         }
     except (ValueError, TypeError):
         return None
@@ -590,7 +607,7 @@ def _get_vehicle_position(vehicle_id: str) -> Optional[Dict[str, float]]:
 def report_position(vehicle_id: str) -> Dict[str, Any]:
     """
     POST /monitor/report-position
-    上报车辆实时位置。位置从车辆控制服务读取；读取不到时仍按接口要求发送 0 占位，并记录警告。
+    上报车辆实时位置。位置从资源池服务 platforms.motion_status 读取；读取不到时仍按接口要求发送 0 占位，并记录警告。
     """
     vid = _clean_vid(vehicle_id)
     pos = _get_vehicle_position(vid)

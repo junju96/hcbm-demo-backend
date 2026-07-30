@@ -75,8 +75,9 @@ def _build_car_actions_from_plan(
       - 数据服务器标准 /simple: team_actions 为 list[{"team_id": "...", "car_actions": [...]}]
       - 旧真实服务器: team_actions 为 list[{"team_id": "...", "team_actions": [...]}]
       - 旧 Mock 数据: team_actions 为 dict{"team_id": [...]}
-    当 plan.stages[].team_actions 中 actions 为空（数据服务器 /simple 投影丢失）时，
-    尝试按 plan_id + vid 从数据服务器查询 CAR_ACTIONS 资源补全。
+    当 plan.stages[].team_actions 中引用的 vehicle 的 actions 为空（数据服务器 /simple 投影丢失）时，
+    按 car_actions_id 精确匹配从数据服务器查询 CAR_ACTIONS 资源补全该引用的 actions。
+    不做整 plan 级别的反查补全：stages 未引用的车辆/行动一律不显示。
 
     http_post 参数用于指定调用哪个数据服务器：默认 _http_post（协同席数据服务器），
     操控席调用时应传入 _http_post_operator，避免席位数据串用。
@@ -138,75 +139,8 @@ def _build_car_actions_from_plan(
                     "action_type": vehicle.get("action_type", ""),
                 })
 
-    # 当 plan.stages 中 team_actions 为空时，尝试从 CAR_ACTIONS 资源补全整个 plan 的车辆行动
-    if not results and stages:
-        try:
-            print(f"[AS-DEBUG] _build_car_actions_from_plan: team_actions empty, query CAR_ACTIONS for plan_id={plan_id}")
-            car_actions_data = http_post(
-                "/api/v1/task_pool/resources/query",
-                {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
-                silent=False,
-                timeout=(1, 5),
-            )
-            if isinstance(car_actions_data, list) and car_actions_data:
-                # 收集 plan.teams 中列出的车辆 vid，避免把不属于本 plan 的车辆补全进来
-                allowed_vids = set()
-                for team in plan.get("teams", []) or []:
-                    for v in team.get("vehicles", []) or []:
-                        if isinstance(v, dict) and v.get("vid"):
-                            allowed_vids.add(v["vid"])
-                        elif isinstance(v, str):
-                            allowed_vids.add(v)
-                # 如果 teams 为空，从 ACTION 资源反查属于本 plan 的 action_ids，再映射回车辆
-                if not allowed_vids:
-                    try:
-                        action_resources = http_post(
-                            "/api/v1/task_pool/resources/query",
-                            {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
-                            silent=False,
-                            timeout=(1, 10),
-                        )
-                        if isinstance(action_resources, list):
-                            plan_action_ids = {a.get("action_id") for a in action_resources if a.get("action_id")}
-                            for ca in car_actions_data:
-                                ca_ids = set(ca.get("action_ids") or [])
-                                if ca_ids & plan_action_ids:
-                                    vid = ca.get("vid", "")
-                                    if vid:
-                                        allowed_vids.add(vid)
-                    except Exception as e:
-                        print(f"[AS-DEBUG] query ACTION for allowed_vids failed: {e}")
-                # 单阶段时把所有 CAR_ACTIONS 分配到该阶段；多阶段时按 stage_seq 顺序分配
-                sorted_stages = sorted(stages, key=lambda s: s.get("stage_seq", 0))
-                stage = sorted_stages[0] if sorted_stages else {}
-                stage_id = stage.get("stage_id", "")
-                stage_seq = stage.get("stage_seq", 0)
-                stage_title = stage.get("title", "")
-                team_id = (stage.get("team_ids") or [""])[0]
-                for ca in car_actions_data:
-                    vid = ca.get("vid", "")
-                    actions = ca.get("actions", [])
-                    if not vid:
-                        continue
-                    # 只补全 plan.teams 中列出的车辆，或通过 ACTION 反查确认属于本 plan 的车辆
-                    if allowed_vids and vid not in allowed_vids:
-                        continue
-                    ca_id = ca.get("car_actions_id") or f"ca:{plan_id}:{stage_id}:{vid}"
-                    results.append({
-                        "car_actions_id": ca_id,
-                        "vid": vid,
-                        "plan_id": plan_id,
-                        "stage_id": stage_id,
-                        "stage_seq": stage_seq,
-                        "stage_title": stage_title,
-                        "team_id": team_id,
-                        "actions": _normalize_plan_field_names(_scale_coords_to_float(actions)),
-                        "state": ca.get("state") or "SCHEDULED",
-                        "action_type": ca.get("action_type", ""),
-                    })
-                print(f"[AS-DEBUG] filled {len(results)} vehicles from CAR_ACTIONS for plan_id={plan_id}")
-        except Exception as e:
-            print(f"[AS-DEBUG] query CAR_ACTIONS for empty team_actions failed: {e}")
+    # 注意：不做整 plan 级别的 CAR_ACTIONS 反查补全——前端显示必须与 plan 文档严格一致，
+    # stages 中没有引用的车辆/行动（数据服务器上的历史残留）不显示。
 
     # 按 plan_id 查询 CAR_ACTIONS / ACTION 资源补全 actions（按 car_actions_id 精确匹配，避免跨阶段串用）
     if missing_queries:
