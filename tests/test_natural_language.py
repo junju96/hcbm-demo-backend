@@ -62,3 +62,104 @@ class TestNaturalLanguage(unittest.TestCase):
         self.assertIn("DC01", text)
         self.assertIn("XL01", text)
         self.assertIn("0.8 米", text)
+
+    def test_conflict_precheck_with_conflict_info(self):
+        text = detection_result_to_text(
+            DetectionType.ROUTE_CONFLICT_PRECHECK,
+            {
+                "conflict_intervals": [
+                    {
+                        "vehicle_a": "equipment:ZD01",
+                        "vehicle_b": "equipment:ZD03",
+                        "t_start": 40.0,
+                        "t_end": 50.0,
+                        "peak_distance_m": 0.8,
+                        "peak_t": 45.0,
+                        "conflict_info": {
+                            "vehicle_a": "equipment:ZD01",
+                            "plan_a": "plan-0001",
+                            "vehicle_b": "equipment:ZD03",
+                            "plan_b": "plan-0002",
+                            "conflict_point": {"lon": 116.119, "lat": 39.75},
+                        },
+                    }
+                ]
+            },
+        )
+        # 文本中车辆编号去掉 equipment: 前缀
+        self.assertIn("车辆 ZD01（方案 plan-0001）与车辆 ZD03（方案 plan-0002）", text)
+        self.assertNotIn("equipment:", text)
+        self.assertIn("冲突点位于（经度 116.119，纬度 39.75）", text)
+        self.assertIn("最小距离为 0.8 米", text)
+
+    def test_conflict_precheck_missing_plan(self):
+        text = detection_result_to_text(
+            DetectionType.ROUTE_CONFLICT_PRECHECK,
+            {
+                "conflict_intervals": [
+                    {
+                        "vehicle_a": "equipment:ZD01",
+                        "vehicle_b": "equipment:ZD03",
+                        "t_start": 40.0,
+                        "t_end": 50.0,
+                        "peak_distance_m": 0.8,
+                        "peak_t": 45.0,
+                        "conflict_info": {
+                            "conflict_point": {"lon": 116.119, "lat": 39.75},
+                        },
+                    }
+                ]
+            },
+        )
+        self.assertIn("车辆 ZD01（方案 未知方案）与车辆 ZD03（方案 未知方案）", text)
+        self.assertIn("冲突点位于", text)
+
+    def test_conflict_precheck_missing_conflict_point(self):
+        text = detection_result_to_text(
+            DetectionType.ROUTE_CONFLICT_PRECHECK,
+            {
+                "conflict_intervals": [
+                    {
+                        "vehicle_a": "equipment:ZD01",
+                        "vehicle_b": "equipment:ZD03",
+                        "t_start": 40.0,
+                        "t_end": 50.0,
+                        "peak_distance_m": 0.8,
+                        "peak_t": 45.0,
+                        "conflict_info": {"plan_a": "plan-0001", "plan_b": "plan-0002"},
+                    }
+                ]
+            },
+        )
+        self.assertIn("（方案 plan-0001）", text)
+        self.assertNotIn("冲突点位于", text)
+
+    def test_conflict_realtime_uses_same_template(self):
+        text = detection_result_to_text(
+            DetectionType.ROUTE_CONFLICT_REALTIME,
+            {
+                "warnings": [
+                    {
+                        "vehicle_id": "ZD01",
+                        "matched_segment_index": 1,
+                        "conflict_intervals": [
+                            {
+                                "vehicle_a": "equipment:ZD01",
+                                "vehicle_b": "equipment:ZD03",
+                                "t_start": 40.0,
+                                "t_end": 50.0,
+                                "peak_distance_m": 0.8,
+                                "peak_t": 45.0,
+                                "conflict_info": {
+                                    "plan_a": "plan-0001",
+                                    "plan_b": "plan-0002",
+                                    "conflict_point": {"lon": 116.119, "lat": 39.75},
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        self.assertIn("车辆 ZD01（方案 plan-0001）与车辆 ZD03（方案 plan-0002）", text)
+        self.assertIn("冲突点位于（经度 116.119，纬度 39.75）", text)

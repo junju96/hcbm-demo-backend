@@ -507,6 +507,7 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     try:
         local_fresh = _merge_plan_keep_local_params(plan, _scale_coords_to_float(normalized))
         local_fresh["local_dirty"] = False
+        local_fresh["_seat"] = "operator"
         task_pool.set(rid, local_fresh)
     except Exception as e:
         print(f"[PATCH-OP-PLAN] update local cache failed: {e}, plan_id={plan_id}")

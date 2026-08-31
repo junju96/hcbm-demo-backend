@@ -260,15 +260,44 @@ def _render_route_conflict_realtime(result: Mapping[str, Any]) -> list[str]:
     return messages
 
 
+def _strip_equipment_prefix(value: Any) -> str:
+    """展示用车辆编号：去掉 equipment: 前缀（equipment:ZD01 -> ZD01）。"""
+    text = str(value or "").strip()
+    if text.startswith("equipment:"):
+        return text.split("equipment:", 1)[1].strip()
+    return text
+
+
 def _describe_conflict_interval(interval: Mapping[str, Any]) -> str:
-    vehicle_a = interval.get("vehicle_a", "未知车辆")
-    vehicle_b = interval.get("vehicle_b", "未知车辆")
+    vehicle_a = _strip_equipment_prefix(interval.get("vehicle_a")) or "未知车辆"
+    vehicle_b = _strip_equipment_prefix(interval.get("vehicle_b")) or "未知车辆"
     start = _format_time(interval.get("t_start"))
     end = _format_time(interval.get("t_end"))
     peak_distance = _format_quantity(interval.get("peak_distance_m"), "米")
     peak_time = _format_time(interval.get("peak_t"))
+
+    # conflict_info 嵌在每个 interval 内，提供冲突双方所属方案与冲突点
+    conflict_info = interval.get("conflict_info")
+    if not isinstance(conflict_info, Mapping):
+        conflict_info = {}
+    plan_a = str(conflict_info.get("plan_a") or "").strip() or "未知方案"
+    plan_b = str(conflict_info.get("plan_b") or "").strip() or "未知方案"
+
+    # conflict_point 缺失时整句省略，不显示占位坐标
+    point_text = ""
+    conflict_point = conflict_info.get("conflict_point")
+    if isinstance(conflict_point, Mapping):
+        lon = conflict_point.get("lon")
+        lat = conflict_point.get("lat")
+        if lon is not None and lat is not None:
+            point_text = (
+                f"，冲突点位于（经度 {_format_number(lon, max_decimals=6)}，"
+                f"纬度 {_format_number(lat, max_decimals=6)}）"
+            )
+
     return (
-        f"车辆 {vehicle_a} 与车辆 {vehicle_b} 预计从 {start} 至 {end} 存在冲突，"
+        f"车辆 {vehicle_a}（方案 {plan_a}）与车辆 {vehicle_b}（方案 {plan_b}）"
+        f"预计从 {start} 至 {end} 存在冲突{point_text}，"
         f"最小距离为 {peak_distance}，风险最高时刻为 {peak_time}。"
     )
 

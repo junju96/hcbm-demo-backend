@@ -35,12 +35,15 @@ from app.services.natural_language import DetectionType, detection_result_to_tex
 # ---------- 配置 ----------
 
 TASK_MONITORING_BASE_URL = "http://25.11.1.178:28509"
-POLL_INTERVAL_SECONDS = 5.0
+POLL_INTERVAL_SECONDS = 10.0
 REQUEST_TIMEOUT_SECONDS = 5
 
 WARNING_SERVICE_BASE_URL = "http://25.11.1.147:28478"
 WARNING_SERVICE_PATH = "/monitor/task"
 WARNING_REQUEST_TIMEOUT_SECONDS = 3
+
+# 同一车辆、同一类型预警的最小上报间隔（秒）：距上次同类型上报不足该阈值时跳过
+MIN_REPORT_INTERVAL_SECONDS = 60.0
 
 _SOURCE_TO_DETECTION_TYPE = {
     "/timeout/actions/status": DetectionType.TASK_TIMEOUT,
@@ -238,13 +241,35 @@ def _map_action_status(state: Any) -> str:
 
 
 _sent_warning_signatures: Dict[str, set] = {}
+# 最小上报间隔节流：f"{plan}#{vehicle}#{detection_type}" -> 上次上报的 epoch 秒
+_last_warning_times: Dict[str, float] = {}
+# 已完成首次上报的检测接口集合：f"{plan}#{vehicle}" -> {source, ...}
+# 某类检测首次上报成功后，该类接口不再轮询
+_completed_detection_sources: Dict[str, set] = {}
+# 任务开始执行的墙钟时刻：f"{plan}#{vehicle}" -> epoch 秒
+# 用于上报 update_time 时换算任务相对时间
+_monitor_start_times: Dict[str, float] = {}
 _warning_lock = threading.Lock()
+
+# start_time 解析结果小于该阈值（2000-01-01）时，视为 1970 基准的任务相对时间
+_RELATIVE_TIME_THRESHOLD = 946684800
+
+# 轮询中的检测类接口（report-position 为位置上报，不在其列）
+DETECTION_SOURCES = (
+    "/timeout/actions/status",
+    "/monitor/lookahead-warning",
+    "/monitor/check-deviation",
+)
 
 
 def clear_warning_signatures(plan_id: str, vehicle_id: str) -> None:
     key = _monitor_key(plan_id, vehicle_id)
     with _warning_lock:
         _sent_warning_signatures.pop(key, None)
+        _completed_detection_sources.pop(key, None)
+        _monitor_start_times.pop(key, None)
+        for tk in [k for k in _last_warning_times if k.startswith(f"{key}#")]:
+            _last_warning_times.pop(tk, None)
 
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
@@ -320,7 +345,10 @@ def _warning_signature(source: str, detection_type: DetectionType, synthetic: Di
       - 任务超时（TASK_TIMEOUT）和路线偏离（ROUTE_DEVIATION）这两类提示信息，
         在同一个 plan/vehicle 的一次执行周期内只上报一次；plan 结束或中断后
         通过 stop_monitoring -> clear_warning_signatures 重置。
-      - 路线冲突类保持原有细粒度签名，避免遗漏不同时间/不同车辆对的冲突。
+      - 路线冲突类（预检/临机预警）按 车辆对 去重：同一对车辆同一类型的问题，
+        对同一个任务只上报一次（区间时间漂移、路线段变化不再触发重复上报）。
+      - 最小上报间隔：同一车辆同一类型的两次上报之间至少间隔
+        MIN_REPORT_INTERVAL_SECONDS 秒，不足的跳过（节流兜底）。
     """
     if detection_type == DetectionType.TASK_TIMEOUT:
         vid = list(synthetic["vehicles"].keys())[0]
@@ -332,12 +360,12 @@ def _warning_signature(source: str, detection_type: DetectionType, synthetic: Di
     if detection_type == DetectionType.ROUTE_CONFLICT_PRECHECK:
         interval = synthetic["conflict_intervals"][0]
         pair = sorted([str(interval.get("vehicle_a", "")), str(interval.get("vehicle_b", ""))])
-        return f"precheck:{pair[0]}:{pair[1]}:{interval.get('t_start', '')}:{interval.get('t_end', '')}"
+        return f"precheck:{pair[0]}:{pair[1]}"
 
     if detection_type == DetectionType.ROUTE_CONFLICT_REALTIME:
         interval = synthetic["warnings"][0]["conflict_intervals"][0]
         pair = sorted([str(interval.get("vehicle_a", "")), str(interval.get("vehicle_b", ""))])
-        return f"realtime:{pair[0]}:{pair[1]}:{interval.get('t_start', '')}:{interval.get('t_end', '')}"
+        return f"realtime:{pair[0]}:{pair[1]}"
 
     return f"{source}:{json.dumps(synthetic, ensure_ascii=False, sort_keys=True)}"
 
@@ -351,17 +379,23 @@ def _send_warning(
     warning_type: str,
     action_ids: List[str],
     warning_content: str,
+    conflict_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     warning_id = str(uuid.uuid4())
+    monitor_report = {
+        "plan_id": plan_id,
+        "equipment_ids": [vehicle_id],
+        "action_ids": action_ids,
+        "warning_type": warning_type,
+        "warning_content": warning_content,
+    }
+    # 路线冲突预检：原样透传 interval.conflict_info（保留 equipment: 前缀）；
+    # 未提供时不加该字段，保持报文兼容
+    if conflict_info is not None:
+        monitor_report["conflict_info"] = conflict_info
     payload = {
         "warning_id": warning_id,
-        "monitor_report": {
-            "plan_id": plan_id,
-            "equipment_ids": [vehicle_id],
-            "action_ids": action_ids,
-            "warning_type": warning_type,
-            "warning_content": warning_content,
-        },
+        "monitor_report": monitor_report,
     }
     url = f"{WARNING_SERVICE_BASE_URL}{WARNING_SERVICE_PATH}"
     _log("DEBUG", f"POST {url} payload={json.dumps(payload, ensure_ascii=False)}")
@@ -398,26 +432,31 @@ def send_warnings_if_any(
     source: str,
     result: Dict[str, Any],
     plan_name: Optional[str] = None,
-) -> None:
-    """如果监控接口结果包含异常，则发送提醒（去重）。"""
+) -> bool:
+    """如果监控接口结果包含异常，则发送提醒（去重）。
+
+    返回 True 表示本次至少有一条预警被实际发送（未被去重/节流跳过）。
+    """
     if not isinstance(result, dict) or not result.get("ok") or not result.get("data"):
-        return
+        return False
 
     detection_type = _SOURCE_TO_DETECTION_TYPE.get(source)
     if detection_type is None:
         _log("WARN", f"unknown warning source {source}")
-        return
+        return False
 
     data = result["data"]
     anomalies = _extract_anomalies(source, data, vehicle_id)
     if not anomalies:
-        return
+        return False
 
     key = _monitor_key(plan_id, vehicle_id)
     with _warning_lock:
         sent = _sent_warning_signatures.setdefault(key, set())
 
     warning_type = _WARNING_TYPES.get(detection_type, "unknown")
+    throttle_key = f"{key}#{detection_type.value}"
+    any_sent = False
     for synthetic, action_ids in anomalies:
         signature = _warning_signature(source, detection_type, synthetic)
         with _warning_lock:
@@ -428,11 +467,30 @@ def send_warnings_if_any(
                     f"vehicle={vehicle_id} signature={signature}",
                 )
                 continue
+            now = time.time()
+            last_sent = _last_warning_times.get(throttle_key, 0.0)
+            if now - last_sent < MIN_REPORT_INTERVAL_SECONDS:
+                _log(
+                    "DEBUG",
+                    f"warning throttled (min interval {MIN_REPORT_INTERVAL_SECONDS}s): "
+                    f"plan={plan_id} vehicle={vehicle_id} type={detection_type.value}",
+                )
+                continue
             # 无论后续发送是否成功，同一类 warning 在本次 plan 执行周期内只尝试一次
             sent.add(signature)
+            _last_warning_times[throttle_key] = now
 
         text = detection_result_to_text(detection_type, synthetic, plan_name=plan_name)
-        _send_warning(plan_id, vehicle_id, warning_type, action_ids, text)
+        # 仅路线冲突预检上报时携带 conflict_info（嵌在该条 interval 内）
+        conflict_info = None
+        if detection_type == DetectionType.ROUTE_CONFLICT_PRECHECK:
+            interval = synthetic["conflict_intervals"][0]
+            raw_info = interval.get("conflict_info")
+            if isinstance(raw_info, dict):
+                conflict_info = raw_info
+        _send_warning(plan_id, vehicle_id, warning_type, action_ids, text, conflict_info=conflict_info)
+        any_sent = True
+    return any_sent
 
 
 # ---------- 黄色接口：任务下发成功后调用 ----------
@@ -458,7 +516,7 @@ def init_timeout_monitor(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) ->
             "description": action.get("name", ""),
         })
 
-    payload = {"vehicles": {vid: monitor_actions}}
+    payload = {"plan_id": plan_id, "vehicles": {vid: monitor_actions}}
     result = _post("/timeout/init-monitor", payload)
     _log("INFO", f"init-timeout-monitor plan={plan_id} vehicle={vid} actions={len(monitor_actions)} ok={result['ok']}")
     return result
@@ -499,6 +557,7 @@ def register_route(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         prev_speed = speed_val
 
     payload = {
+        "plan_id": plan.get("plan_id", ""),
         "vehicle_id": vid,
         "points": all_points,
         "departure_time": 0,
@@ -509,17 +568,18 @@ def register_route(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def validate_route(distance_threshold_m: float = 2.0, sample_interval_s: float = 0.5) -> Dict[str, Any]:
+def validate_route(plan_id: str, distance_threshold_m: float = 2.0, sample_interval_s: float = 0.5) -> Dict[str, Any]:
     """
     POST /conflict/validate
-    出发前预检冲突。
+    出发前预检冲突。plan_id 必填，监控服务按 plan 隔离校验范围。
     """
     payload = {
+        "plan_id": plan_id,
         "distance_threshold_m": distance_threshold_m,
         "sample_interval_s": sample_interval_s,
     }
     result = _post("/conflict/validate", payload)
-    _log("INFO", f"validate-route ok={result['ok']}")
+    _log("INFO", f"validate-route plan={plan_id} ok={result['ok']}")
     return result
 
 
@@ -527,10 +587,27 @@ def register_mission_for_monitoring(plan_id: str, vehicle_id: str, plan: Dict[st
     """
     任务下发成功后一次性调用：注册超时检测 + 注册路线 + 预检冲突。
     返回三个接口的原始结果，便于前端或日志查看。
+    预检冲突可通过 config.MONITORING_PRECHECK_ENABLED 临时关闭（关闭时返回 skipped 标记）。
     """
+    from app.config import MONITORING_ENABLED, MONITORING_PRECHECK_ENABLED, MONITORING_ROUTE_REGISTER_ENABLED
+
+    if not MONITORING_ENABLED:
+        # 总开关关闭：所有状态监控的检测和上报都不执行
+        _log("INFO", f"monitoring disabled by config, skip register/precheck plan={plan_id} vehicle={vehicle_id}")
+        skipped = {"ok": False, "skipped": True, "error": "monitoring disabled by config"}
+        return {"timeout_init": skipped, "route_register": skipped, "route_validate": skipped}
+
     timeout_result = init_timeout_monitor(plan_id, vehicle_id, plan)
-    route_result = register_route(vehicle_id, plan)
-    validate_result = validate_route()
+    if MONITORING_ROUTE_REGISTER_ENABLED:
+        route_result = register_route(vehicle_id, plan)
+    else:
+        route_result = {"ok": False, "skipped": True, "error": "route register disabled by config"}
+        _log("INFO", f"route register disabled by config, skip plan={plan_id} vehicle={vehicle_id}")
+    if MONITORING_PRECHECK_ENABLED:
+        validate_result = validate_route(plan_id)
+    else:
+        validate_result = {"ok": False, "skipped": True, "error": "precheck disabled by config"}
+        _log("INFO", f"precheck disabled by config, skip conflict validate plan={plan_id} vehicle={vehicle_id}")
     return {
         "timeout_init": timeout_result,
         "route_register": route_result,
@@ -541,6 +618,30 @@ def register_mission_for_monitoring(plan_id: str, vehicle_id: str, plan: Dict[st
 # ---------- 绿色接口：任务开始执行后每 5 秒调用 ----------
 
 
+def _report_update_time(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) -> float:
+    """确定状态上报的 update_time，与注册给监控服务的预计完成时间保持同一时间基准。
+
+    规划侧写的 start_time 有两种形态：
+      - 1970 基准的任务相对时间（如 1970-01-01 08:03:33 → 相对秒）：update_time 用
+        距任务开始执行的秒数，与注册的 end_time（如 T=518）同一基准；
+      - 真实日期时间：update_time 用 Unix 纪元秒。
+    """
+    vid = _clean_vid(vehicle_id)
+    for action in _flatten_vehicle_actions(plan, vid):
+        ts = _parse_timestamp((action.get("param") or {}).get("start_time"))
+        if ts is None:
+            continue
+        if ts < _RELATIVE_TIME_THRESHOLD:
+            key = _monitor_key(plan_id, vid)
+            start = _monitor_start_times.get(key)
+            if start is None:
+                start = time.time()
+                _monitor_start_times[key] = start
+            return time.time() - start
+        break  # 首个可解析的 start_time 决定基准
+    return time.time()
+
+
 def report_action_status(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
     """
     POST /timeout/actions/status
@@ -548,7 +649,7 @@ def report_action_status(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any
     """
     vid = _clean_vid(vehicle_id)
     actions = _flatten_vehicle_actions(plan, vid)
-    now = time.time()
+    now = _report_update_time(plan.get("plan_id", ""), vid, plan)
     status_list = []
     for action in actions:
         status_list.append({
@@ -556,7 +657,7 @@ def report_action_status(vehicle_id: str, plan: Dict[str, Any]) -> Dict[str, Any
             "status": _map_action_status(action.get("state")),
             "update_time": now,
         })
-    payload = {"vehicles": {vid: status_list}}
+    payload = {"plan_id": plan.get("plan_id", ""), "vehicles": {vid: status_list}}
     result = _post("/timeout/actions/status", payload)
     _log("INFO", f"report-action-status vehicle={vid} actions={len(status_list)} ok={result['ok']}")
     return result
@@ -604,7 +705,7 @@ def _get_vehicle_position(vehicle_id: str) -> Optional[Dict[str, float]]:
         return None
 
 
-def report_position(vehicle_id: str) -> Dict[str, Any]:
+def report_position(vehicle_id: str, plan_id: Optional[str] = None) -> Dict[str, Any]:
     """
     POST /monitor/report-position
     上报车辆实时位置。位置从资源池服务 platforms.motion_status 读取；读取不到时仍按接口要求发送 0 占位，并记录警告。
@@ -612,9 +713,10 @@ def report_position(vehicle_id: str) -> Dict[str, Any]:
     vid = _clean_vid(vehicle_id)
     pos = _get_vehicle_position(vid)
     if pos is None:
-        _log("WARN", f"无法从车辆控制服务获取位置 vehicle={vid}")
+        _log("WARN", f"资源池中未找到车辆位置 vehicle={vid}")
         pos = {"lat": 0.0, "lon": 0.0, "heading_deg": 0.0, "speed_ms": 0.0}
     payload = {
+        "plan_id": plan_id or "",
         "vehicle_id": vid,
         "position": {
             "lat": pos["lat"],
@@ -630,6 +732,7 @@ def report_position(vehicle_id: str) -> Dict[str, Any]:
 
 
 def lookahead_warning(
+    plan_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     lookahead_seconds: float = 30.0,
     distance_threshold_m: float = 2.0,
@@ -640,6 +743,7 @@ def lookahead_warning(
     临机预警。
     """
     payload = {
+        "plan_id": plan_id or "",
         "timestamp": timestamp if timestamp is not None else time.time(),
         "lookahead_seconds": lookahead_seconds,
         "distance_threshold_m": distance_threshold_m,
@@ -650,13 +754,13 @@ def lookahead_warning(
     return result
 
 
-def check_deviation(vehicle_id: str, threshold_m: float = 10.0) -> Dict[str, Any]:
+def check_deviation(vehicle_id: str, threshold_m: float = 10.0, plan_id: Optional[str] = None) -> Dict[str, Any]:
     """
     POST /monitor/check-deviation
     检查车辆是否偏离任务路线。
     """
     vid = _clean_vid(vehicle_id)
-    payload = {"vehicle_id": vid, "threshold_m": threshold_m}
+    payload = {"plan_id": plan_id or "", "vehicle_id": vid, "threshold_m": threshold_m}
     result = _post("/monitor/check-deviation", payload)
     _log("INFO", f"check-deviation vehicle={vid} ok={result['ok']}")
     return result
@@ -692,30 +796,67 @@ def _is_mission_finished(status_result: Dict[str, Any], vehicle_id: str) -> bool
 
 
 def _poll_once(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) -> None:
-    """单次轮询：调用所有绿色接口；若任务已全部完成则自动停止轮询。"""
-    status_result = report_action_status(vehicle_id, plan)
-    send_warnings_if_any(
-        plan_id, vehicle_id, "/timeout/actions/status", status_result,
-        plan_name=plan.get("title"),
-    )
+    """单次轮询。
 
-    # 如果所有行动都已完成，自动停止后续轮询
-    if _is_mission_finished(status_result, vehicle_id):
-        _log("INFO", f"mission finished plan={plan_id} vehicle={vehicle_id}, stopping monitor")
+    每类检测接口（DETECTION_SOURCES）在首次成功上报预警后停止该类的轮询；
+    三类全部上报过、或行动全部完成时，结束整个轮询。
+    位置上报（report-position）在还有未完成检测时持续进行（偏离/临机预警依赖实时位置）。
+    """
+    key = _monitor_key(plan_id, vehicle_id)
+    with _warning_lock:
+        done = _completed_detection_sources.setdefault(key, set())
+        done_snapshot = set(done)
+    if len(done_snapshot) >= len(DETECTION_SOURCES):
         stop_monitoring(plan_id, vehicle_id)
         return
 
-    report_position(vehicle_id)
-    lookahead_result = lookahead_warning()
-    send_warnings_if_any(
-        plan_id, vehicle_id, "/monitor/lookahead-warning", lookahead_result,
-        plan_name=plan.get("title"),
-    )
-    deviation_result = check_deviation(vehicle_id)
-    send_warnings_if_any(
-        plan_id, vehicle_id, "/monitor/check-deviation", deviation_result,
-        plan_name=plan.get("title"),
-    )
+    newly_done = set()
+
+    # 1. 行动超时检测（同时用进度判断任务是否全部完成）
+    if "/timeout/actions/status" not in done_snapshot:
+        status_result = report_action_status(vehicle_id, plan)
+        if send_warnings_if_any(
+            plan_id, vehicle_id, "/timeout/actions/status", status_result,
+            plan_name=plan.get("title"),
+        ):
+            newly_done.add("/timeout/actions/status")
+        # 如果所有行动都已完成，自动停止后续轮询
+        if _is_mission_finished(status_result, vehicle_id):
+            _log("INFO", f"mission finished plan={plan_id} vehicle={vehicle_id}, stopping monitor")
+            stop_monitoring(plan_id, vehicle_id)
+            return
+
+    # 2. 位置上报（仍有未完成检测时持续）
+    report_position(vehicle_id, plan_id)
+
+    # 3. 临机冲突预警
+    if "/monitor/lookahead-warning" not in done_snapshot:
+        lookahead_result = lookahead_warning(plan_id=plan_id)
+        if send_warnings_if_any(
+            plan_id, vehicle_id, "/monitor/lookahead-warning", lookahead_result,
+            plan_name=plan.get("title"),
+        ):
+            newly_done.add("/monitor/lookahead-warning")
+
+    # 4. 路线偏离检测
+    if "/monitor/check-deviation" not in done_snapshot:
+        deviation_result = check_deviation(vehicle_id, plan_id=plan_id)
+        if send_warnings_if_any(
+            plan_id, vehicle_id, "/monitor/check-deviation", deviation_result,
+            plan_name=plan.get("title"),
+        ):
+            newly_done.add("/monitor/check-deviation")
+
+    if newly_done:
+        with _warning_lock:
+            done = _completed_detection_sources.setdefault(key, set())
+            done.update(newly_done)
+            all_done = len(done) >= len(DETECTION_SOURCES)
+        for source in newly_done:
+            _log("INFO", f"detection reported once, stop polling source={source} plan={plan_id} vehicle={vehicle_id}")
+        if all_done:
+            _log("INFO", f"all detection sources reported, stopping monitor plan={plan_id} vehicle={vehicle_id}")
+            stop_monitoring(plan_id, vehicle_id)
 
 
 def _schedule_next(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) -> None:
@@ -747,10 +888,18 @@ def _poll_cycle(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) -> None:
 
 def start_monitoring(plan_id: str, vehicle_id: str, plan: Dict[str, Any]) -> None:
     """任务开始执行后启动 5 秒轮询。"""
+    from app.config import MONITORING_ENABLED
+
+    if not MONITORING_ENABLED:
+        _log("INFO", f"monitoring disabled by config, skip polling plan={plan_id} vehicle={vehicle_id}")
+        return
     key = _monitor_key(plan_id, vehicle_id)
     stop_monitoring(plan_id, vehicle_id)
     with _active_lock:
         _active_timers[key] = None  # 占位，防止竞态
+    # 记录任务开始执行的墙钟时刻，用于上报任务相对时间基准的 update_time
+    # （stop_monitoring 会清空旧值，此处必为新一周期的起点）
+    _monitor_start_times[key] = time.time()
     _log("INFO", f"start monitoring plan={plan_id} vehicle={vehicle_id}")
     # 使用 Timer 在后台线程中执行，避免阻塞 FastAPI 事件循环
     timer = threading.Timer(POLL_INTERVAL_SECONDS, _poll_cycle, args=(plan_id, vehicle_id, plan))

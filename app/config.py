@@ -26,12 +26,37 @@ VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
 # Zenoh 路由器地址（TCP）
 ZENOH_ROUTER_URL = "tcp/25.11.1.147:7447"
 
+# ========== 任务监控 ==========
+# 任务监控总开关：False 时关闭所有状态监控的检测和上报——
+# 下发时的超时注册/路线注册/冲突预检、执行后的 4 个轮询接口全部不调用。
+# 后续要恢复时改回 True 并重启后端即可（细分开关见下面两项）。
+MONITORING_ENABLED = False
+
+# 发布/下发时的路线冲突预检（POST /conflict/validate）开关：
+# False 时下发不再调用预检接口，也不产生预检预警弹窗。后续要恢复时改回 True 并重启。
+MONITORING_PRECHECK_ENABLED = True
+
+# 发布/下发时的路线注册（POST /conflict/vehicles）开关：
+# False 时不再向监控服务注册路线（避免污染全局路线注册表）。恢复时改回 True 并重启。
+MONITORING_ROUTE_REGISTER_ENABLED = True
+
 # ========== 本地服务 ==========
 # 后端 HTTP 服务端口
 BACKEND_PORT = 28600
 
 # 前端开发服务器端口
 FRONTEND_PORT = 5173
+
+
+# ========== 席位下发映射 ==========
+# 协同席"下发"按钮（/ingestion/forward）的席位 ID → 目标数据服务器 IP 映射。
+# 调试期间所有席位统一下发到操控席数据服务器（25.11.1.56，DS 默认端口 28801）。
+# 注意：DS 只接受裸 IP 或已注册席位 ID，不接受 ip:port 格式。
+SEAT_TARGET_IPS = {
+    "1": "25.11.1.56",
+    "2": "25.11.1.56",
+    "3": "25.11.1.56",
+}
 
 
 def get_data_server_url() -> str:

@@ -139,9 +139,17 @@ def forward_resources_to_targets(
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
+        # 400 等错误时把 DS 返回的错误详情（如"未知目标 ID 或非法 IP: 4"）透传出来，便于定位
+        detail = ""
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                detail = f" | resp={resp.text[:200]}"
+            except Exception:
+                pass
         if not silent:
-            print(f"[DS-ERR] POST {url} | error={e}")
-        return None
+            print(f"[DS-ERR] POST {url} | error={e}{detail}")
+        return {"ok": False, "error": f"{e}{detail}", "details": []}
 
 def get_kill_chain(resource_id: str) -> Optional[Dict[str, Any]]:
     """查询单个杀伤链详情"""

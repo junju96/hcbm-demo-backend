@@ -1045,32 +1045,78 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
     }
 
 
-def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
-    """
-    更新 plan 中指定 action 的 param。
+# ---------- plan 数据直读数据服务器（不依赖本地缓存） ----------
 
-    数据服务器目前不支持直接 PATCH /resources/{rid}/actions/{action_id}，
-    该接口会返回 404；也不支持通过 PATCH /resources/{rid} 保存 stages.team_actions
-    等嵌套字段。因此本函数只更新本地 task_pool 缓存，并标记 local_dirty，让后续
-    get_plan_detail 优先返回本地编辑结果。需要持久化到数据服务器时，由调用方通过
-    sync/plan import 等更高层接口完成。
-    """
-    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+# GET /resources/{rid} 响应中属于数据服务器包装层的键，读取文档时剔除
+_DS_WRAPPER_KEYS = {"attributes", "connections", "relations", "source", "raw_payload"}
 
-    # 1. 确保本地 task_pool 中有该 plan 的缓存
+
+def _fetch_plan_document(rid: str, http_get, label: str = "data_server") -> Optional[Dict[str, Any]]:
+    """从数据服务器读取 plan 全文档（/resources/{rid}，非 /simple 投影）。
+
+    /simple 投影会丢失 stages.team_actions 内嵌的 actions，不能作为写回数据源。
+    返回字段归一化、坐标还原为浮点后的 plan dict；资源不存在或服务不可达返回 None。
+    """
+    data = http_get(f"/api/v1/task_pool/resources/{rid}", silent=False)
+    if not isinstance(data, dict) or not data.get("resource_id"):
+        return None
+    doc = {k: v for k, v in data.items() if k not in _DS_WRAPPER_KEYS}
+    doc = _normalize_plan_field_names(doc)
+    doc = _scale_coords_to_float(doc)
+    return doc
+
+
+def _import_plan_payload(rid: str, plan: Dict[str, Any], http_post, label: str = "data_server") -> bool:
+    """把 plan 通过 ingestion/import 全量写回数据服务器（只取白名单顶层字段）。"""
+    payload = {
+        "resource_id": rid,
+        "task_type": "PLAN",
+        "plan_id": plan.get("plan_id") or rid.replace("plan:", ""),
+        "title": plan.get("title", ""),
+        "description": plan.get("description", ""),
+        "state": plan.get("state") or "DRAFT",
+        "teams": plan.get("teams", []),
+        "targets": plan.get("targets", []),
+        "stages": plan.get("stages", []),
+    }
+    # 数据服务器要求 action.param 中的经纬高以 10^6 缩放后的整数存储
+    payload = _scale_coords_to_int(payload)
+    result = http_post(
+        "/api/v1/task_pool/ingestion/import",
+        {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
+        silent=False,
+    )
+    return result is not None
+
+
+def _cache_plan(rid: str, plan: Dict[str, Any], seat: str) -> None:
+    """写入本地缓存（仅作数据服务器不可达时的兜底），并标记所属席位。"""
+    from app.services.task_pool import task_pool
+
+    plan["_seat"] = seat
+    task_pool.set(rid, plan)
+
+
+def _get_cached_plan_for_seat(rid: str, seat: str) -> Optional[Dict[str, Any]]:
+    """读取本地缓存的 plan，仅当缓存属于指定席位时返回。
+
+    协同席/操控席同机部署时共用进程内 task_pool 单例，key 不带席位，
+    该校验防止把另一个席位的缓存当作本席位数据源（席位数据串用）。
+    """
+    from app.services.task_pool import task_pool
+
     plan = task_pool.get(rid)
-    if plan is None:
-        data = _http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
-        if data is not None and isinstance(data, dict):
-            plan = _normalize_plan_field_names(data)
-            plan = _scale_coords_to_float(plan)
-            task_pool.set(rid, plan)
+    if not plan:
+        return None
+    cached_seat = plan.get("_seat")
+    if cached_seat is not None and cached_seat != seat:
+        print(f"[AS-WARN] local cache seat mismatch, ignore: rid={rid} cached={cached_seat} requested={seat}")
+        return None
+    return plan
 
-    if plan is None:
-        # 本地没有缓存，无法更新
-        return False
 
-    # 2. 在 plan.stages[].team_actions 中查找并更新 action.param
+def _apply_action_param_update(plan: Dict[str, Any], action_id: str, param: Dict[str, Any]) -> bool:
+    """在 plan 的 stages/car_actions/vehicle_summary 中同步更新指定 action 的 param。"""
     updated = False
     for stage in plan.get("stages", []):
         team_actions = stage.get("team_actions", {})
@@ -1099,9 +1145,6 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
             break
 
     if updated:
-        plan["updated_at"] = datetime.now(timezone.utc).isoformat()
-        # 标记本地已被修改，避免后续 get_plan_detail 被数据服务器旧缓存覆盖
-        plan["local_dirty"] = True
         # 同步更新 car_actions / vehicle_summary 中同名 action，避免多份数据不一致
         for ca in plan.get("car_actions", []) or []:
             for action in ca.get("actions", []) or []:
@@ -1112,81 +1155,53 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
                 for action in stage.get("actions", []) or []:
                     if action.get("action_id") == action_id:
                         action["param"] = copy.deepcopy(param)
-        task_pool.set(rid, plan)
-        print(f"[AS-DEBUG] updated action param locally: plan_id={plan_id} action_id={action_id}")
-    else:
-        print(f"[AS-DEBUG] action not found locally: plan_id={plan_id} action_id={action_id} stages_team_actions_type={type(plan.get('stages',[{}])[0].get('team_actions')).__name__ if plan.get('stages') else 'no_stages'}")
-
     return updated
 
 
-def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
-    """
-    操控端：更新本地 task_pool 中指定 action 的 param。
+def _update_action_param_impl(
+    plan_id: str,
+    action_id: str,
+    param: Dict[str, Any],
+    http_get,
+    http_post,
+    label: str,
+) -> bool:
+    """更新 plan 中指定 action 的 param：直读数据服务器全文档 → 修改 → import 写回。
 
-    操控席数据服务器目前不支持直接 PATCH /resources/{rid}/actions/{action_id}，
-    因此本函数只更新操控席本地 task_pool 缓存，并标记 local_dirty。需要持久化到
-    数据服务器时，由前端调用 syncOperatorPlanToDataServer 完成。
+    数据服务器不支持 PATCH 嵌套字段，因此采用全文档读改写。数据服务器不可达时
+    退回同席位本地缓存编辑并标记 local_dirty，待后续 sync 补偿。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
 
-    # 1. 确保本地 task_pool 中有该 plan 的缓存
-    plan = task_pool.get(rid)
+    plan = _fetch_plan_document(rid, http_get, label=label)
     if plan is None:
-        data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
-        if data is not None and isinstance(data, dict):
-            plan = _normalize_plan_field_names(data)
-            plan = _scale_coords_to_float(plan)
-            task_pool.set(rid, plan)
-
+        plan = _get_cached_plan_for_seat(rid, label)
     if plan is None:
         return False
 
-    # 2. 在 plan.stages[].team_actions 中查找并更新 action.param
-    updated = False
-    for stage in plan.get("stages", []):
-        team_actions = stage.get("team_actions", {})
-        vehicles: List[Dict[str, Any]] = []
-        if isinstance(team_actions, dict):
-            for vlist in team_actions.values():
-                if isinstance(vlist, list):
-                    vehicles.extend(vlist)
-        elif isinstance(team_actions, list):
-            for ta in team_actions:
-                vehicles.extend(ta.get("car_actions", []))
-                if not ta.get("car_actions"):
-                    vehicles.extend(ta.get("team_actions", []))
+    updated = _apply_action_param_update(plan, action_id, param)
+    if not updated:
+        print(f"[AS-DEBUG] action not found: plan_id={plan_id} action_id={action_id} seat={label}")
+        return False
 
-        for vehicle in vehicles:
-            for action in vehicle.get("actions", []):
-                if action.get("action_id") == action_id:
-                    action["param"] = copy.deepcopy(param)
-                    updated = True
-                    break
-            if updated:
-                break
-        if updated:
-            break
+    plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+    ok = _import_plan_payload(rid, plan, http_post, label=label)
+    plan["local_dirty"] = not ok
+    _cache_plan(rid, plan, label)
+    print(f"[AS-DEBUG] updated action param: plan_id={plan_id} action_id={action_id} seat={label} import_ok={ok}")
+    return True
 
-    if updated:
-        plan["updated_at"] = datetime.now(timezone.utc).isoformat()
-        plan["local_dirty"] = True
-        # 同步更新 car_actions / vehicle_summary 中同名 action
-        for ca in plan.get("car_actions", []) or []:
-            for action in ca.get("actions", []) or []:
-                if action.get("action_id") == action_id:
-                    action["param"] = copy.deepcopy(param)
-        for vs in plan.get("vehicle_summary", []) or []:
-            for stage in vs.get("stages", []) or []:
-                for action in stage.get("actions", []) or []:
-                    if action.get("action_id") == action_id:
-                        action["param"] = copy.deepcopy(param)
-        task_pool.set(rid, plan)
-        print(f"[AS-DEBUG] updated operator action param locally: plan_id={plan_id} action_id={action_id}")
-    else:
-        print(f"[AS-DEBUG] operator action not found locally: plan_id={plan_id} action_id={action_id}")
 
-    return updated
+def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
+    """协同席 — 更新指定 action 的 param 并写回协同席数据服务器。"""
+    return _update_action_param_impl(plan_id, action_id, param, _http_get, _http_post, "data_server")
+
+
+def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
+    """操控端 — 更新指定 action 的 param 并写回操控席数据服务器。"""
+    return _update_action_param_impl(
+        plan_id, action_id, param, _http_get_operator, _http_post_operator, "operator"
+    )
 
 
 # ========== 行动序列运行时状态管理（内存） ==========
@@ -1221,7 +1236,9 @@ class ActionSequenceRuntime:
 
     def get_state(self, plan_id: str) -> Dict[str, Any]:
         self._ensure(plan_id)
-        return copy.deepcopy(self._states[plan_id])
+        state = copy.deepcopy(self._states[plan_id])
+        state.pop("_fingerprint", None)  # 内部字段，不下发给前端
+        return state
 
     def transit(self, plan_id: str, new_state: str) -> tuple[bool, str]:
         """尝试状态转移，返回 (success, message)。支持幂等：当前状态已是目标状态时直接返回成功。"""
@@ -1259,10 +1276,10 @@ class ActionSequenceRuntime:
     def init_state_from_plan(self, plan_id: str, plan: Dict[str, Any]):
         """
         根据 plan 中的 action 状态推断 plan 整体运行时状态，并初始化内存状态。
-        仅在尚未追踪该 plan 时执行（避免覆盖用户已触发的控制操作）。
+        以 action 状态集合为指纹：指纹不变时不覆盖（避免覆盖用户已触发的控制操作）；
+        指纹变化（数据服务器上的 plan 被重写/行动状态推进）时重新推断，
+        防止内存状态永久锁定在旧版本的状态（如 DONE）上。
         """
-        if plan_id in self._states:
-            return
         action_states = set()
         # 从 car_actions 收集
         for ca in plan.get("car_actions", []):
@@ -1272,6 +1289,17 @@ class ActionSequenceRuntime:
             for stage in vs.get("stages", []):
                 for action in stage.get("actions", []):
                     action_states.add(action.get("state", "SCHEDULED"))
+        fingerprint = frozenset(action_states)
+
+        existing = self._states.get(plan_id)
+        if existing:
+            if existing.get("_fingerprint") == fingerprint:
+                return
+            # 会话进行中的状态（ACTIVE/PAUSED）只在行动全部完成（{DONE}）时被指纹覆盖；
+            # 否则保持现状——开始/暂停后 DS 行动状态尚未推进时，重新推断会把 ACTIVE 冲回 SCHEDULED
+            if existing.get("state") in ("ACTIVE", "PAUSED") and action_states != {"DONE"}:
+                existing["_fingerprint"] = fingerprint
+                return
         # 推断整体状态：有 ACTIVE 则为 ACTIVE；无 ACTIVE 有 PAUSED 则为 PAUSED；全部为 DONE 则为 DONE；否则 SCHEDULED
         inferred = "SCHEDULED"
         if "ACTIVE" in action_states:
@@ -1285,6 +1313,7 @@ class ActionSequenceRuntime:
             "started_at": None,
             "paused_at": None,
             "updated_at": None,
+            "_fingerprint": fingerprint,
         }
 
 
@@ -2598,7 +2627,7 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
-    task_pool.set(rid, plan)
+    task_pool.set(rid, {**plan, "_seat": "operator"})
     return task_pool.get(rid)
 
 
@@ -2631,16 +2660,30 @@ update_operator_plan_locally = update_plan_locally
 
 
 def update_plan(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """协同席 — 更新本地 task_pool 中的 PLAN 资源，并同步到协同席数据服务器。"""
-    updated = update_plan_locally(plan_id, payload)
-    if not updated:
+    """协同席 — 直读数据服务器全文档，应用白名单字段修改后 import 写回。
+
+    数据服务器不可达时退回同席位本地缓存编辑，标记 local_dirty 待后续 sync 补偿。
+    """
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    allowed_top_keys = {"title", "description", "state", "teams", "targets", "stages", "search_text", "car_actions", "vehicle_summary"}
+
+    plan = _fetch_plan_document(rid, _http_get, label="data_server")
+    if plan is None:
+        plan = _get_cached_plan_for_seat(rid, "data_server")
+    if plan is None:
         return None
-    # 尝试同步到协同席数据服务器；失败不影响本地更新结果
-    try:
-        sync_plan_to_data_server(plan_id, _http_post, _http_get, label="data_server")
-    except Exception as e:
-        print(f"[UPDATE-PLAN] sync to data_server failed: {e}, plan_id={plan_id}")
-    return task_pool.get(plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}")
+
+    for key, value in payload.items():
+        if key in allowed_top_keys:
+            plan[key] = copy.deepcopy(value)
+    plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # 确保每个 action 的 start_time / mission_duration 有有效默认值
+    _normalize_action_timing(plan)
+
+    ok = _import_plan_payload(rid, plan, _http_post, label="data_server")
+    plan["local_dirty"] = not ok
+    _cache_plan(rid, plan, "data_server")
+    return plan
 
 
 def _is_empty_or_zero_list(value):
@@ -2776,67 +2819,39 @@ def sync_plan_to_data_server(
     http_get,
     label: str = "data_server",
 ) -> bool:
-    """把本地 task_pool 中的 plan 通过 ingestion/import 同步到指定数据服务器。
+    """把 plan 通过 ingestion/import 同步到指定数据服务器。
 
+    数据源优先级：
+      1. 本地缓存中有未推送的修改（local_dirty 且属于本席位）→ 推送本地；
+      2. 数据服务器全文档（/resources/{rid}，非 /simple 投影）→ 以 DS 为准刷新；
+      3. 数据服务器不可达时，回退同席位本地缓存。
     经过测试，PATCH /resources/{rid} 无法保存 stages.team_actions 等嵌套字段，
     因此改用全量 import 方式 upsert，确保行动序列数据落盘到数据服务器。
     """
-    from app.services.task_pool import task_pool
-
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
-    plan = task_pool.get(rid)
+
+    local = _get_cached_plan_for_seat(rid, label)
+    if local and local.get("local_dirty"):
+        plan = local
+    else:
+        plan = _fetch_plan_document(rid, http_get, label=label)
+        if plan is None:
+            plan = local  # 数据服务器不可达，本地兜底
     if not plan:
-        # 本地无缓存时，从数据服务器拉取后再同步，保证 sync 接口始终可用
-        remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
-        if remote is None or not isinstance(remote, dict):
-            return False
-        plan = _normalize_plan_field_names(remote)
-        task_pool.set(rid, plan)
+        return False
+
     # 同步前确保时间参数有效，避免数据服务器保存空/0 值
     _normalize_action_timing(plan)
     try:
-        payload = {
-            "resource_id": rid,
-            "task_type": "PLAN",
-            "plan_id": plan.get("plan_id") or rid.replace("plan:", ""),
-            "title": plan.get("title", ""),
-            "description": plan.get("description", ""),
-            "state": plan.get("state") or "DRAFT",
-            "teams": plan.get("teams", []),
-            "targets": plan.get("targets", []),
-            "stages": plan.get("stages", []),
-        }
-        # 数据服务器要求 action.param 中的经纬高以 10^6 缩放后的整数存储
-        payload = _scale_coords_to_int(payload)
-        result = http_post(
-            "/api/v1/task_pool/ingestion/import",
-            {"resources": [payload], "return_data_type": "typed", "ignore_errors": True},
-            silent=False,
-        )
-        if result is None:
-            return False
-        # 同步成功后拉取数据服务器最新数据并更新本地缓存，但保留本地有效的 action.param，
-        # 避免 /simple 接口投影丢失 area/points 等列表参数后把本地数据覆盖成空/0。
-        try:
-            remote = http_get(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
-            if remote is not None and isinstance(remote, dict):
-                normalized = _normalize_plan_field_names(remote)
-                # 数据服务器返回的整数坐标转回浮点，保持本地缓存与前端显示一致
-                normalized = _scale_coords_to_float(normalized)
-                merged = _merge_plan_keep_local_params(plan, normalized)
-                merged["local_dirty"] = False
-                task_pool.set(rid, merged)
-                print(f"[SYNC-PLAN] synced and merged remote into local cache from {label}, plan_id={plan_id}")
-            else:
-                # 拉取失败：保留 local_dirty，让后续 get_plan_detail 继续优先本地数据
-                local_plan = task_pool.get(rid)
-                if local_plan:
-                    local_plan["local_dirty"] = True
-                    task_pool.set(rid, local_plan)
-                print(f"[SYNC-PLAN] sync ok but refresh remote failed from {label}, keep local_dirty, plan_id={plan_id}")
-        except Exception as refresh_err:
-            print(f"[SYNC-PLAN] sync ok but refresh local cache failed from {label}: {refresh_err}, plan_id={plan_id}")
-        return True
+        ok = _import_plan_payload(rid, plan, http_post, label=label)
+        if ok:
+            plan["local_dirty"] = False
+        else:
+            plan["local_dirty"] = True
+        _cache_plan(rid, plan, label)
+        if ok:
+            print(f"[SYNC-PLAN] synced plan to {label}, plan_id={plan_id}")
+        return ok
     except Exception as e:
         print(f"[SYNC-PLAN] sync to {label} failed: {e}")
         return False
@@ -2897,12 +2912,13 @@ def _delete_vehicle_from_plan(
     label: str = "data_server",
 ) -> Dict[str, Any]:
     """删除指定方案中某车辆的行动序列，并同步到指定数据服务器。"""
-    from app.services.task_pool import task_pool
-
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
-    plan = task_pool.get(rid)
+    # 直读数据服务器全文档；不可达时回退同席位本地缓存
+    plan = _fetch_plan_document(rid, http_get, label=label)
     if not plan:
-        return {"ok": False, "error": "Plan not found in local task_pool"}
+        plan = _get_cached_plan_for_seat(rid, label)
+    if not plan:
+        return {"ok": False, "error": "Plan not found"}
 
     # 统一 vid 格式，支持 "equipment:ZD02" 和 "ZD02" 两种传入形式
     normalized_vid = vid if vid.startswith("equipment:") else f"equipment:{vid}"
@@ -2956,7 +2972,7 @@ def _delete_vehicle_from_plan(
         else:
             print(f"[DELETE-VEHICLE] failed to cascade delete {ca_rid} from {label}, skip")
 
-    # 3) 更新本地 task_pool：移除该车辆
+    # 3) 从文档中移除该车辆并直接 import 写回数据服务器
     updated_plan = copy.deepcopy(plan)
     for stage in updated_plan.get("stages", []) or []:
         team_actions = stage.get("team_actions", {})
@@ -2972,11 +2988,11 @@ def _delete_vehicle_from_plan(
     updated_plan["car_actions"] = [c for c in updated_plan.get("car_actions", []) if c.get("vid") != vid]
     updated_plan["vehicle_summary"] = [v for v in updated_plan.get("vehicle_summary", []) if v.get("vid") != vid]
     updated_plan["updated_at"] = datetime.now(timezone.utc).isoformat()
-    updated_plan["local_dirty"] = True
-    task_pool.set(rid, updated_plan)
 
-    # 4) 同步到数据服务器
-    sync_ok = sync_plan_to_data_server(plan_id, http_post, http_get, label=label)
+    # 4) 写回数据服务器并更新本地缓存
+    sync_ok = _import_plan_payload(rid, updated_plan, http_post, label=label)
+    updated_plan["local_dirty"] = not sync_ok
+    _cache_plan(rid, updated_plan, label)
 
     return {
         "ok": True,
@@ -3001,18 +3017,31 @@ def delete_vehicle(plan_id: str, vid: str) -> Dict[str, Any]:
 def dispatch_plan_forward(plan_id: str, target_ips: List[str], timeout_seconds: int = 30) -> Dict[str, Any]:
     """协同席 — 将指定 plan 通过数据服务器 /ingestion/forward 下发到目标席位。
 
+    席位 ID 先经 config.SEAT_TARGET_IPS 映射为目标数据服务器 IP（调试期间全部
+    映射到操控席 25.11.1.56）；已是裸 IP 的值原样透传。
     返回包含数据服务器原始响应的 dict。
     """
+    from app.config import SEAT_TARGET_IPS
+
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    resolved = [SEAT_TARGET_IPS.get(t, t) for t in target_ips]
     result = forward_resources_to_targets(
-        target_ips=target_ips,
+        target_ips=resolved,
         resource_ids=[rid],
         timeout_seconds=timeout_seconds,
         silent=False,
     )
     if result is None:
         return {"ok": False, "error": "调用数据服务器 /ingestion/forward 失败"}
-    return {"ok": True, "plan_id": plan_id, "target_ips": target_ips, "forward_result": result}
+    if result.get("ok") is False:
+        # DS HTTP 层错误（如未知席位 ID），透传详情
+        return {"ok": False, "error": f"调用数据服务器 /ingestion/forward 失败: {result.get('error')}"}
+    # DS 返回 200 也可能部分/全部目标失败，把失败详情透传给前端
+    failed = [d for d in (result.get("details") or []) if d.get("failed_targets")]
+    if failed:
+        msgs = "; ".join(f"{d.get('resource_id')}: {d.get('message') or d.get('status')}" for d in failed)
+        return {"ok": False, "error": f"部分目标下发失败: {msgs}", "forward_result": result}
+    return {"ok": True, "plan_id": plan_id, "target_ips": resolved, "forward_result": result}
 
 
 # ==================== Zenoh plan 变化通知订阅 ====================
