@@ -1204,6 +1204,35 @@ def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, 
     )
 
 
+def notify_plan_map_clicked(plan_id: str, http_patch, label: str = "data_server") -> Dict[str, Any]:
+    """方案条目被点击时通知数据服务器：PATCH payload.last_click，由 DS 负责后续上图。
+
+    DS 侧处理逻辑未上线时转发会失败，仅记日志并返回 ok=False，不影响前端选中流程。
+    """
+    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    last_click = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result = http_patch(
+        f"/api/v1/task_pool/resources/{rid}",
+        {"payload": {"last_click": last_click}},
+        silent=False,
+    )
+    if result is None:
+        print(f"[MAP-NOTIFY] PATCH failed: plan_id={plan_id} seat={label}")
+        return {"ok": False, "error": "patch data server failed"}
+    print(f"[MAP-NOTIFY] plan_id={plan_id} seat={label} last_click={last_click}")
+    return {"ok": True, "plan_id": plan_id, "last_click": last_click}
+
+
+def notify_plan_map_clicked_coordinator(plan_id: str) -> Dict[str, Any]:
+    """协同席 — 通知协同席数据服务器。"""
+    return notify_plan_map_clicked(plan_id, _http_patch, "data_server")
+
+
+def notify_plan_map_clicked_operator(plan_id: str) -> Dict[str, Any]:
+    """操控席 — 通知操控席数据服务器。"""
+    return notify_plan_map_clicked(plan_id, _http_patch_operator, "operator")
+
+
 # ========== 行动序列运行时状态管理（内存） ==========
 
 class ActionSequenceRuntime:
