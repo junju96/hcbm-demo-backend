@@ -43,6 +43,8 @@ from app.services.action_sequence_client import (
     delete_vehicle_operator,
     delete_vehicle,
     dispatch_plan_forward,
+    notify_plan_map_clicked_coordinator,
+    notify_plan_map_clicked_operator,
     PLAN_SSE_SCOPE,
     _http_get_operator,
     _http_post_operator,
@@ -197,6 +199,24 @@ async def patch_operator_action_param(plan_id: str, action_id: str, body: Action
         "action_id": action_id,
         "updated": True,
     })
+
+
+@router.post("/action-sequences/plans/{plan_id}/map-notify", response_model=ApiResponse)
+async def map_notify_plan(plan_id: str):
+    """协同席 — 方案条目被点击，PATCH last_click 到协同席数据服务器，由 DS 触发上图"""
+    result = notify_plan_map_clicked_coordinator(plan_id)
+    if not result.get("ok"):
+        return ApiResponse(code=502, message=result.get("error", "notify data server failed"), data=None)
+    return ApiResponse(data=result)
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/map-notify", response_model=ApiResponse)
+async def map_notify_plan_operator(plan_id: str):
+    """操控席 — 方案条目被点击，PATCH last_click 到操控席数据服务器，由 DS 触发上图"""
+    result = notify_plan_map_clicked_operator(plan_id)
+    if not result.get("ok"):
+        return ApiResponse(code=502, message=result.get("error", "notify data server failed"), data=None)
+    return ApiResponse(data=result)
 
 
 @router.post("/action-sequences/plans/{plan_id}/start", response_model=ApiResponse)
