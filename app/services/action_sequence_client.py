@@ -1050,35 +1050,64 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
 # GET /resources/{rid} 响应中属于数据服务器包装层的键，读取文档时剔除
 _DS_WRAPPER_KEYS = {"attributes", "connections", "relations", "source", "raw_payload"}
 
+# 写回数据服务器时需剥离的嵌套包装层键：DS 会为资源附加这些包装，
+# 原样写回会被 DS 再包一层，导致嵌套无限加深
+_DS_NESTED_WRAPPER_KEYS = {
+    "attributes", "connections", "relations", "source", "raw_payload",
+    "search_text", "created_at", "updated_at", "dependencies",
+}
 
-def _fetch_plan_document(rid: str, http_get, label: str = "data_server") -> Optional[Dict[str, Any]]:
+# 后端本地附加的内部键，不得写回数据服务器
+_INTERNAL_PLAN_KEYS = {"_seat", "local_dirty"}
+
+# 顶层派生键（后端为前端展示生成，DS 原文没有），写回前删除；
+# 注意只能删顶层——stages[].team_actions[].car_actions 是 DS 原生结构，必须保留
+_DERIVED_TOP_KEYS = {"car_actions", "vehicle_summary"}
+
+
+def _strip_ds_wrappers(obj: Any) -> Any:
+    """递归剥离 DS 包装层键与本地内部键，业务数据原样保留。"""
+    if isinstance(obj, list):
+        return [_strip_ds_wrappers(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+    return {
+        k: _strip_ds_wrappers(v)
+        for k, v in obj.items()
+        if k not in _DS_NESTED_WRAPPER_KEYS and k not in _INTERNAL_PLAN_KEYS
+    }
+
+
+def _fetch_plan_document(rid: str, http_get, label: str = "data_server", normalize: bool = False) -> Optional[Dict[str, Any]]:
     """从数据服务器读取 plan 全文档（/resources/{rid}，非 /simple 投影）。
 
     /simple 投影会丢失 stages.team_actions 内嵌的 actions，不能作为写回数据源。
-    返回字段归一化、坐标还原为浮点后的 plan dict；资源不存在或服务不可达返回 None。
+    normalize=False（默认，写回路径）保持 DS 原始字段命名，写回时不产生命名漂移；
+    normalize=True 仅供需要前端命名（title/name/vehicles）的读取路径使用。
+    返回坐标还原为浮点后的 plan dict；资源不存在或服务不可达返回 None。
     """
     data = http_get(f"/api/v1/task_pool/resources/{rid}", silent=False)
     if not isinstance(data, dict) or not data.get("resource_id"):
         return None
     doc = {k: v for k, v in data.items() if k not in _DS_WRAPPER_KEYS}
-    doc = _normalize_plan_field_names(doc)
+    if normalize:
+        doc = _normalize_plan_field_names(doc)
     doc = _scale_coords_to_float(doc)
     return doc
 
 
 def _import_plan_payload(rid: str, plan: Dict[str, Any], http_post, label: str = "data_server") -> bool:
-    """把 plan 通过 ingestion/import 全量写回数据服务器（只取白名单顶层字段）。"""
-    payload = {
-        "resource_id": rid,
-        "task_type": "PLAN",
-        "plan_id": plan.get("plan_id") or rid.replace("plan:", ""),
-        "title": plan.get("title", ""),
-        "description": plan.get("description", ""),
-        "state": plan.get("state") or "DRAFT",
-        "teams": plan.get("teams", []),
-        "targets": plan.get("targets", []),
-        "stages": plan.get("stages", []),
-    }
+    """把 plan 文档通过 ingestion/import 全量写回数据服务器。
+
+    以数据服务器为准：不做字段白名单挑选、不改字段命名；仅剥离嵌套子资源的
+    DS 包装层（防止往返嵌套加深）、本地内部键与顶层派生键，坐标按 DS 要求缩放为整数。
+    """
+    payload = _strip_ds_wrappers(copy.deepcopy(plan))
+    for key in _DERIVED_TOP_KEYS:
+        payload.pop(key, None)
+    payload["resource_id"] = rid
+    payload.setdefault("task_type", "PLAN")
+    payload.setdefault("plan_id", rid.replace("plan:", ""))
     # 数据服务器要求 action.param 中的经纬高以 10^6 缩放后的整数存储
     payload = _scale_coords_to_int(payload)
     result = http_post(
@@ -2688,9 +2717,15 @@ def update_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[
 update_operator_plan_locally = update_plan_locally
 
 
+# 前端编辑保存传入的字段名 → DS 文档字段名（写回保持 DS 原始命名）
+_UPDATE_PLAN_KEY_MAP = {"title": "plan_title", "description": "plan_description"}
+
+
 def update_plan(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """协同席 — 直读数据服务器全文档，应用白名单字段修改后 import 写回。
 
+    写回以 DS 原始命名为准（payload 中的前端命名 title/description 映射为
+    plan_title/plan_description）；返回给调用方（前端）的是归一化命名的副本。
     数据服务器不可达时退回同席位本地缓存编辑，标记 local_dirty 待后续 sync 补偿。
     """
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
@@ -2704,15 +2739,15 @@ def update_plan(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any
 
     for key, value in payload.items():
         if key in allowed_top_keys:
-            plan[key] = copy.deepcopy(value)
-    plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+            plan[_UPDATE_PLAN_KEY_MAP.get(key, key)] = copy.deepcopy(value)
     # 确保每个 action 的 start_time / mission_duration 有有效默认值
     _normalize_action_timing(plan)
 
     ok = _import_plan_payload(rid, plan, _http_post, label="data_server")
     plan["local_dirty"] = not ok
     _cache_plan(rid, plan, "data_server")
-    return plan
+    # 返回给前端的副本归一化命名（title/name/vehicles），不影响写回与缓存的 DS 原文
+    return _normalize_plan_field_names(copy.deepcopy(plan))
 
 
 def _is_empty_or_zero_list(value):
