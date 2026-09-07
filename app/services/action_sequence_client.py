@@ -216,7 +216,18 @@ def _build_car_actions_from_plan(
                                 matched.sort(key=lambda x: x.get("action_seq") or 0)
                                 filled = matched
                     if filled:
-                        item["actions"] = _normalize_plan_field_names(_scale_coords_to_float(filled))
+                        # DS 的 CAR_ACTIONS.action_ids 是累加语义（历史重复写入会攒下多份
+                        # 相同 action_id），补全时按 action_id 去重，保序保留首个
+                        seen_action_ids = set()
+                        deduped = []
+                        for a in filled:
+                            aid = a.get("action_id")
+                            if aid:
+                                if aid in seen_action_ids:
+                                    continue
+                                seen_action_ids.add(aid)
+                            deduped.append(a)
+                        item["actions"] = _normalize_plan_field_names(_scale_coords_to_float(deduped))
                         print(f"[AS-DEBUG] filled actions for ca_id={ca_id} vid={item.get('vid')} stage={item.get('stage_id')}, len={len(item['actions'])}")
         except Exception as e:
             print(f"[AS-DEBUG] query CAR_ACTIONS failed: {e}")
