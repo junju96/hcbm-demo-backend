@@ -24,7 +24,7 @@ VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
 
 # ========== Zenoh 消息服务 ==========
 # Zenoh 路由器地址（TCP）
-ZENOH_ROUTER_URL = "tcp/25.11.1.147:7447"
+ZENOH_ROUTER_URL = "tcp/25.11.1.3:7447"
 
 # ========== 任务监控 ==========
 # 任务监控总开关：False 时关闭所有状态监控的检测和上报——

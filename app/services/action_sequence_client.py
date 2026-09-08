@@ -15,7 +15,6 @@ import copy
 import hashlib
 import json
 import re
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 
@@ -266,6 +265,38 @@ def _normalize_plan_field_names(obj: Any) -> Any:
         new_key = key_map.get(k, k)
         normalized[new_key] = _normalize_plan_field_names(v)
     return normalized
+
+
+def _to_ds_native_field_names(obj: Any) -> Any:
+    """写回数据服务器前，把本地/前端命名转为 DS 原生命名（_normalize_plan_field_names 的逆方向）。
+
+    DS 的 TEAM 类型只认 team_name/team_description/team_equipments，ACTION 只认
+    action_name/action_description；用本地命名（name/vehicles）import 时 DS 会生成
+    默认名（编组-XXX / 行动-action-XXXX）并丢掉 team_equipments（2026-09-07 踩坑）。
+    幂等：DS 原生键已存在时以原生键为准，本地键保留不动（DS 会忽略）。
+    类型按字典形状判定：含 action_id/action_seq 视为 ACTION；
+    含 team_id 且不含 actions/car_actions 视为 TEAM。
+    """
+    if isinstance(obj, list):
+        return [_to_ds_native_field_names(item) for item in obj]
+    if not isinstance(obj, dict):
+        return obj
+
+    out = {k: _to_ds_native_field_names(v) for k, v in obj.items()}
+
+    if "action_id" in out or "action_seq" in out:
+        if "action_name" not in out and "name" in out:
+            out["action_name"] = out["name"]
+        if "action_description" not in out and "description" in out:
+            out["action_description"] = out["description"]
+    elif "team_id" in out and "actions" not in out and "car_actions" not in out:
+        if "team_name" not in out and "name" in out:
+            out["team_name"] = out["name"]
+        if "team_description" not in out and "description" in out:
+            out["team_description"] = out["description"]
+        if "team_equipments" not in out and "vehicles" in out:
+            out["team_equipments"] = out["vehicles"]
+    return out
 
 
 def _plan_sort_key(item: Dict[str, Any]) -> Tuple[int, str]:
@@ -589,7 +620,7 @@ def _parse_mission_start_end(param: Dict[str, Any], default_start: str, default_
 _STANDARD_ACTION_TYPES = {
     "auto-move", "follow-move", "silent-guard", "set-return-point", "return-to-base",
     "formation-move", "manual-task", "pose-adjust", "air-recon", "lens-recon",
-    "search-and-shoot", "recon-strike", "40mm-gun-launch", "at-missile-launch",
+    "search-and-shoot", "recon-strike", "30mm-gun-launch", "at-missile-launch",
     "gun-shot", "7.62mm-gun-shot", "rocket-launch", "loitering-munition-launch",
     "laser-illumination", "sound-expel", "acoustic-deterrence", "light-expel",
     "light-deterrence", "em-recon", "electronic-recon", "em-assault", "electronic-assault",
@@ -630,7 +661,8 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "lens-recon": "lens-recon",
         "search-and-shoot": "search-and-shoot",
         "recon-strike": "recon-strike",
-        "40mm-gun-launch": "40mm-gun-launch",
+        "30mm-gun-launch": "30mm-gun-launch",
+        "40mm-gun-launch": "30mm-gun-launch",
         "at-missile-launch": "at-missile-launch",
         "gun-shot": "gun-shot",
         "7.62mm-gun-shot": "7.62mm-gun-shot",
@@ -666,7 +698,8 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         # 侦打车
         "rs-lens": "lens-recon",
         "rs-recon-strike": "search-and-shoot",
-        "rs-40mm": "40mm-gun-launch",
+        "rs-30mm": "30mm-gun-launch",
+        "rs-40mm": "30mm-gun-launch",
         "rs-at": "at-missile-launch",
         "rs-gun": "7.62mm-gun-shot",
         "rs-laser": "laser-illumination",
@@ -742,13 +775,13 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
     if "points" in p and isinstance(p["points"], list) and len(p["points"]) > 0:
         first = p["points"][0]
         if isinstance(first, dict):
-            # 40炮：tart=6, attr=1, thr=80, dam=1, blk=2, figt=2, sug=3
+            # 30炮：tart=6, attr=1, thr=80, dam=1, blk=2, figt=2, sug=3
             if first.get("tart") == 6 and first.get("attr") == 1:
-                # 40炮与机枪、火箭弹、巡飞弹参数结构相似，按 sort/num 区分度低
-                # 但可通过 ammo_type 区分：40炮 ammo_type=2，机枪 ammo_type=1
+                # 30炮与机枪、火箭弹、巡飞弹参数结构相似，按 sort/num 区分度低
+                # 但可通过 ammo_type 区分：30炮 ammo_type=2，机枪 ammo_type=1
                 ammo_type = first.get("ammo_type")
                 if ammo_type == 2:
-                    return "40mm-gun-launch"
+                    return "30mm-gun-launch"
                 if ammo_type == 1:
                     return "7.62mm-gun-shot"
                 # 无 ammo_type 时无法精确区分，保留空字符串让前端兜底
@@ -829,7 +862,8 @@ def _infer_action_type_from_name(name: str) -> str:
         "光电侦察": "lens-recon",
         "侦察打击": "search-and-shoot",
         "巡逻车侦察打击": "search-and-shoot",
-        "40炮打击": "40mm-gun-launch",
+        "30炮打击": "30mm-gun-launch",
+        "40炮打击": "30mm-gun-launch",
         "红箭13导弹打击": "at-missile-launch",
         "机枪打击": "7.62mm-gun-shot",
         "火箭弹打击": "rocket-launch",
@@ -863,8 +897,10 @@ def _infer_action_type_from_name(name: str) -> str:
         "lensrecon": "lens-recon",
         "searchandshoot": "search-and-shoot",
         "reconstrike": "search-and-shoot",
-        "40mmgunlaunch": "40mm-gun-launch",
-        "40mmgun": "40mm-gun-launch",
+        "30mmgunlaunch": "30mm-gun-launch",
+        "30mmgun": "30mm-gun-launch",
+        "40mmgunlaunch": "30mm-gun-launch",
+        "40mmgun": "30mm-gun-launch",
         "atmissilelaunch": "at-missile-launch",
         "atmissile": "at-missile-launch",
         "gunshot": "7.62mm-gun-shot",
@@ -905,7 +941,7 @@ def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     if t in {"rocket-launch", "loitering-munition-launch", "gun-shot"}:
         return "Fire-Support-UGV"
     # 侦打车
-    if t in {"40mm-gun-launch", "at-missile-launch"}:
+    if t in {"30mm-gun-launch", "at-missile-launch"}:
         return "Recon-Strike-UGV"
     # 巡逻车
     if t in {"sound-expel", "acoustic-deterrence", "light-expel", "light-deterrence"}:
@@ -1046,6 +1082,8 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
     return {
         "plan_id": plan.get("plan_id", ""),
         "resource_id": plan.get("resource_id", ""),
+        # uuid：编辑保存时写入 DS 的六位整数，发布时作为 send_mission 的 tid
+        "uuid": plan.get("uuid"),
         "title": title,
         "description": plan.get("description", ""),
         "state": plan.get("state") or "DRAFT",
@@ -1066,8 +1104,14 @@ _DS_WRAPPER_KEYS = {"attributes", "connections", "relations", "source", "raw_pay
 # 原样写回会被 DS 再包一层，导致嵌套无限加深
 _DS_NESTED_WRAPPER_KEYS = {
     "attributes", "connections", "relations", "source", "raw_payload",
-    "search_text", "created_at", "updated_at", "dependencies",
+    "search_text", "created_at", "updated_at",
 }
+
+# 注意：dependencies 不在剥离列表中。它虽是 DS 为每个资源附加的字段，
+# 但对 ACTION 资源它就是业务字段（行动依赖，如 ["1"]），且 DS 会在资源类型化投影中
+# 保留该值（与包装键同级共存，无法靠结构区分）。dependencies 是扁平列表，
+# 原样写回不会导致嵌套加深；剥离它会导致 sync/编辑保存后行动依赖被清空
+# （2026-09-07 踩坑：点击开始后行动序列 DAG 退化为单列纵向布局）。
 
 # 后端本地附加的内部键，不得写回数据服务器
 _INTERNAL_PLAN_KEYS = {"_seat", "local_dirty"}
@@ -1078,7 +1122,7 @@ _DERIVED_TOP_KEYS = {"car_actions", "vehicle_summary"}
 
 
 def _strip_ds_wrappers(obj: Any) -> Any:
-    """递归剥离 DS 包装层键与本地内部键，业务数据原样保留。"""
+    """递归剥离 DS 包装层键与本地内部键，业务数据原样保留（含 action 的 dependencies）。"""
     if isinstance(obj, list):
         return [_strip_ds_wrappers(item) for item in obj]
     if not isinstance(obj, dict):
@@ -1102,6 +1146,12 @@ def _fetch_plan_document(rid: str, http_get, label: str = "data_server", normali
     if not isinstance(data, dict) or not data.get("resource_id"):
         return None
     doc = {k: v for k, v in data.items() if k not in _DS_WRAPPER_KEYS}
+    # uuid 未注册进 DS 的 PLAN schema，类型化投影不返回，仅存在于 raw_payload；
+    # 写回路径若以投影为准会把它从 raw_payload 一并抹掉（sync 覆盖写踩坑），这里显式保留
+    if doc.get("uuid") is None:
+        raw = data.get("raw_payload")
+        if isinstance(raw, dict) and raw.get("uuid") is not None:
+            doc["uuid"] = raw["uuid"]
     if normalize:
         doc = _normalize_plan_field_names(doc)
     doc = _scale_coords_to_float(doc)
@@ -1499,6 +1549,7 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
             "lens-recon": 31,
             "search-and-shoot": 32,
             "recon-strike": 32,
+            "30mm-gun-launch": 33,
             "40mm-gun-launch": 33,
             "at-missile-launch": 34,
             "7.62mm-gun-shot": 35,
@@ -1564,7 +1615,7 @@ def _action_name_to_sid(name: str) -> int:
         return 7
     if "姿态" in n or "转向" in n or "车姿" in n:
         return 9
-    if "40炮" in n or "40mm" in n:
+    if "30炮" in n or "30mm" in n or "40炮" in n or "40mm" in n:
         return 33
     if "红箭" in n or "导弹" in n:
         return 34
@@ -2098,13 +2149,17 @@ def build_mission_data(
 
     # 生成 tid
     if tid is None:
-        # 尝试从 plan_id 提取数字，否则哈希
-        nums = re.findall(r"\d+", plan_id)
-        if nums:
-            tid = int("".join(nums)[:10]) or 10001
+        # 优先用 plan.uuid（编辑保存时写入 DS 的六位整数），否则从 plan_id 提取数字/哈希
+        uuid_tid = _tid_from_plan_uuid(plan)
+        if uuid_tid is not None:
+            tid = uuid_tid
         else:
-            h = hashlib.md5(plan_id.encode()).hexdigest()[:8]
-            tid = int(h, 16) % 90000000 + 10000000
+            nums = re.findall(r"\d+", plan_id)
+            if nums:
+                tid = int("".join(nums)[:10]) or 10001
+            else:
+                h = hashlib.md5(plan_id.encode()).hexdigest()[:8]
+                tid = int(h, 16) % 90000000 + 10000000
 
     # 时间
     now = datetime.now(timezone.utc)
@@ -2300,6 +2355,31 @@ def _plan_id_to_tid(plan_id: str) -> int:
     return int(h, 16) % 90000000 + 10000000
 
 
+def _tid_from_plan_uuid(plan: Optional[Dict[str, Any]]) -> Optional[int]:
+    """取 plan.uuid 作为 tid（编辑保存时写入 DS 的六位整数）；没有或非法时返回 None"""
+    uuid_val = (plan or {}).get("uuid")
+    if uuid_val is None or uuid_val == "":
+        return None
+    try:
+        return int(uuid_val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_plan_tid(plan_id: str) -> int:
+    """control_mission 的 taskid：优先 plan.uuid（与 send_mission 下发的 tid 保持一致，
+    否则车辆侧按 taskid 匹配不到任务），兜底从 plan_id 推导。
+    操控席 plan 在数据服务器，协同席 plan 在协同席数据服务器，两边都试。"""
+    for getter in (get_plan_detail_operator, get_plan_detail):
+        try:
+            uuid_tid = _tid_from_plan_uuid(getter(plan_id))
+        except Exception:
+            uuid_tid = None
+        if uuid_tid is not None:
+            return uuid_tid
+    return _plan_id_to_tid(plan_id)
+
+
 def get_first_vid(plan: Dict[str, Any]) -> str:
     """
     从 plan 中提取第一个 vid（车辆标识）。
@@ -2347,7 +2427,8 @@ def build_control_mission_payload(
     Returns:
         (topic, payload)
     """
-    tid = _plan_id_to_tid(plan_id)
+    # taskid 优先取 plan.uuid（编辑保存时写入 DS），与 send_mission 下发的 tid 保持一致
+    tid = _resolve_plan_tid(plan_id)
 
     # 如果传了 vehicle_vid 则直接用，否则从 plan 详情里取
     if vehicle_vid:
@@ -2420,7 +2501,7 @@ VEHICLE_ACTION_TYPES = {
         "Rocket-Launch", "Loitering-Munition-Launch",
     ],
     "Recon-Strike-UGV": [
-        "Lens-Recon", "Search-And-Shoot", "40mm-Gun-Launch",
+        "Lens-Recon", "Search-And-Shoot", "30mm-Gun-Launch",
         "AT-Missile-Launch", "7.62mm-Gun-Shot",
     ],
     "Patrol-UGV": [
@@ -2639,6 +2720,23 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
     return result
 
 
+def _fetch_plan_uuid_from_raw(rid: str) -> Optional[Any]:
+    """从 DS 全文档的 raw_payload 取 plan.uuid。
+
+    当前 DS 版本的 PLAN 类型投影未注册 uuid 字段，/simple 与类型化查询均不返回；
+    import 时 uuid 仅保留在 raw_payload 中，需补一次全文档查询取回（读 plan 以顶层
+    投影为准的例外：uuid 在投影中不存在，raw_payload 是唯一载体）。若 DS 后续把
+    uuid 注册进 PLAN schema，顶层投影会先命中，本函数不再被调用。
+    """
+    full = _http_get_operator(f"/api/v1/task_pool/resources/{rid}", silent=True)
+    if not isinstance(full, dict):
+        return None
+    raw = full.get("raw_payload")
+    if isinstance(raw, dict):
+        return raw.get("uuid")
+    return None
+
+
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
     """向操控席数据服务器获取方案详情（静默模式）。
     任务详情直接从数据服务器拉取，不使用本地缓存。"""
@@ -2651,6 +2749,10 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
 
     plan = _normalize_plan_field_names(data)
     plan = _scale_coords_to_float(plan)
+    if plan.get("uuid") is None:
+        uuid_val = _fetch_plan_uuid_from_raw(rid)
+        if uuid_val is not None:
+            plan["uuid"] = uuid_val
 
     car_actions = _build_car_actions_from_plan(plan, http_post=_http_post_operator)
     result = _to_frontend_plan(plan, car_actions)
@@ -2660,12 +2762,42 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
 
 
 def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """将行动方案 import 到操控席数据服务器；写入前将经纬高坐标缩放为整数。"""
+    """将行动方案 import 到操控席数据服务器；写入前将经纬高坐标缩放为整数。
+
+    plan 来自前端（本地命名），写入前需把 teams 的 name/vehicles 转为
+    DS 原生命名 team_name/team_equipments，否则 DS 生成默认编组名且丢车辆。
+    """
     result = _http_post_operator(
         "/api/v1/task_pool/ingestion/import",
-        {"resources": [_scale_coords_to_int(plan)], "return_data_type": "typed", "ignore_errors": True},
+        {"resources": [_scale_coords_to_int(_to_ds_native_field_names(plan))], "return_data_type": "typed", "ignore_errors": True},
     )
     return result
+
+
+_PLAN_SEQ_ID_RE = re.compile(r"^plan-(\d+)$", re.IGNORECASE)
+
+
+def _next_sequential_plan_id(plan_ids) -> str:
+    """取现有 plan-<数字> 形式 id 的数字后缀最大值 +1，格式 plan-六位数字（超出 6 位继续递增）"""
+    max_num = 0
+    for pid in plan_ids:
+        m = _PLAN_SEQ_ID_RE.match(str(pid or ""))
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"plan-{max_num + 1:06d}"
+
+
+def _generate_operator_plan_id() -> str:
+    """新建操控席方案的兜底 plan id：顺序号 plan-六位数字。
+
+    编号依据本地 task_pool 与操控席数据服务器（不可达时仅用本地）中已有的 PLAN 资源。
+    """
+    ids = [p.get("plan_id") or p.get("resource_id", "") for p in task_pool.query(task_type="PLAN")]
+    try:
+        ids += [p.get("plan_id") or p.get("resource_id", "") for p in query_plans_operator()]
+    except Exception:
+        pass
+    return _next_sequential_plan_id(ids)
 
 
 def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -2674,7 +2806,7 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
 
     plan_id = plan.get("plan_id") or plan.get("resource_id", "").replace("plan:", "")
     if not plan_id:
-        plan_id = f"PLAN_{uuid.uuid4().hex[:16].upper()}"
+        plan_id = _generate_operator_plan_id()
         plan["plan_id"] = plan_id
 
     rid = plan.get("resource_id") or f"plan:{plan_id}"
@@ -2698,6 +2830,38 @@ def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     task_pool.set(rid, {**plan, "_seat": "operator"})
+    return task_pool.get(rid)
+
+
+def create_coordination_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """协同席 — 新建空方案（通常仅标题，无行动序列数据），import 写入协同席数据服务器。
+
+    plan_id 未传时按 plan-六位数字 顺序号兜底生成（依据协同席数据服务器与本地缓存，
+    与操控席 _generate_operator_plan_id 同策略）。数据服务器不可达时仅保存本地缓存，
+    标记 local_dirty 待后续 sync 补偿。
+    """
+    from app.services.task_pool import task_pool
+
+    plan_id = plan.get("plan_id") or plan.get("resource_id", "").replace("plan:", "")
+    if not plan_id:
+        ids = [p.get("plan_id") or p.get("resource_id", "") for p in task_pool.query(task_type="PLAN")]
+        try:
+            ids += [p.get("plan_id") or p.get("resource_id", "") for p in query_plans()]
+        except Exception:
+            pass
+        plan_id = _next_sequential_plan_id(ids)
+        plan["plan_id"] = plan_id
+
+    rid = plan.get("resource_id") or f"plan:{plan_id}"
+    plan["resource_id"] = rid
+    plan["task_type"] = "PLAN"
+
+    try:
+        ok = _import_plan_payload(rid, plan, _http_post, label="data_server")
+    except Exception:
+        ok = False
+
+    task_pool.set(rid, {**plan, "_seat": "data_server", "local_dirty": not ok})
     return task_pool.get(rid)
 
 

@@ -35,6 +35,7 @@ from app.services.action_sequence_client import (
     get_plan_detail_operator,
     import_plan_to_operator,
     create_operator_plan,
+    create_coordination_plan,
     update_operator_plan_locally,
     update_plan,
     sync_plan_to_operator,
@@ -50,6 +51,7 @@ from app.services.action_sequence_client import (
     _http_post_operator,
     _http_patch_operator,
     _normalize_plan_field_names,
+    _to_ds_native_field_names,
     _scale_coords_to_int,
     _scale_coords_to_float,
     _merge_plan_keep_local_params,
@@ -146,6 +148,18 @@ async def list_plans(limit: int = 200):
     print(f"[AS-API] list_plans returned {len(items)} items, first ids={[p.get('plan_id') for p in items[:3]]}")
     return ApiResponse(data={"items": items, "total": len(items)})
 
+
+@router.post("/action-sequences/plans", response_model=ApiResponse)
+async def create_plan_coordination(plan: Dict[str, Any]):
+    """协同席 — 新建空行动方案（仅标题，无行动序列数据），写入协同席数据服务器"""
+    saved = create_coordination_plan(plan)
+    return ApiResponse(data={
+        "plan_id": saved.get("plan_id"),
+        "resource_id": saved.get("resource_id"),
+        "title": saved.get("title"),
+        "state": saved.get("state"),
+        "message": "方案已创建",
+    })
 
 @router.get("/resources/by_type/{task_type}", response_model=ApiResponse)
 async def list_resources_by_type(task_type: str, limit: int = 50):
@@ -500,12 +514,18 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
         return ApiResponse(code=404, message="Plan not found", data=None)
 
     # 2. 使用请求体作为完整 plan 数据，确保包含 stages/team_actions
-    # 前端发送的请求体已经是完整 plan 结构，直接使用
-    plan = _normalize_plan_field_names(body)
+    # 前端发送的请求体已经是完整 plan 结构，直接使用。
+    # 写回 DS 必须用 DS 原生命名：请求体中 teams 是本地命名（name/vehicles），
+    # 需转为 team_name/team_equipments；actions 的 action_name 保持不动——
+    # 此前误用 _normalize_plan_field_names（读路径方向）把 action_name 转成 name，
+    # 导致 DS 重置行动名为默认名（2026-09-07 踩坑）
+    plan = _to_ds_native_field_names(body)
     plan["resource_id"] = rid
     plan["task_type"] = "PLAN"
     plan["plan_id"] = plan_id
     plan["updated_at"] = datetime.now(timezone.utc).isoformat()
+    # uuid：当前时间戳（毫秒）后六位整数，发布时作为 send_mission 的 tid
+    plan["uuid"] = int(datetime.now(timezone.utc).timestamp() * 1000) % 1000000
 
     # 3. 使用 import 接口全量保存，确保 stages/team_actions 等嵌套数据正确落盘
     result = _http_post_operator(
@@ -521,6 +541,8 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     if updated is None or not isinstance(updated, dict):
         return ApiResponse(code=500, message="保存成功但获取更新后数据失败", data=None)
     normalized = _normalize_plan_field_names(updated)
+    # DS 类型化投影未注册 uuid 字段，/simple 不返回；本次写入的 uuid 直接回填到响应
+    normalized["uuid"] = plan["uuid"]
 
     # 5. 同步更新本地 task_pool 缓存：否则后续 /sync 会把编辑前的旧缓存
     # 重新 import 回数据服务器，导致本次删除/修改被旧数据覆盖（"复活"）
