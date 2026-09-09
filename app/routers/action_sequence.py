@@ -81,11 +81,16 @@ class DispatchForwardRequest(BaseModel):
     timeout_seconds: Optional[int] = 30
 
 
+class CooperativeVehicle(BaseModel):
+    vmf: int                               # 协同车辆 VMF 编号
+    vip: str                               # 协同车辆 IP
+
+
 class CooperativeAuthorizationRequest(BaseModel):
     vehicle_vid: str                       # 本车 vid（topic 中的车辆）
     source: Optional[int] = 1              # 来源类型，默认 1
     command: int                           # 1=下发授权，2=解除授权
-    vehicles: Optional[List[int]] = None   # 协同车辆 VMF 列表（command=1 时携带）
+    vehicles: Optional[List[CooperativeVehicle]] = None  # 协同车辆 [{vmf, vip}]（command=1 时携带）
     target_type: Optional[int] = None      # 首要监视目标（command=1 时携带）
     priorities: Optional[List[int]] = None  # 重点目标类型（command=1 时携带）
 
@@ -680,8 +685,8 @@ async def stop_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(No
 async def set_cooperative_authorization(body: CooperativeAuthorizationRequest):
     """操控端 — 协同任务授权下发/解除（MissionService set_cooperative_authorization, 0x02A20808）。
 
-    command=1 下发授权：携带 vehicles（协同车辆 VMF 列表）/ target_type / priorities；
-    command=2 解除授权：只携带 source 与 command。
+    command=1 下发授权 / command=2 解除授权：均携带 vehicles（协同车辆 [{vmf, vip}] 列表）/
+    target_type / priorities；解除授权需回传下发时的同一组参数（缺字段会被 MissionService 丢弃）。
     """
     if body.command not in (1, 2):
         return ApiResponse(code=400, message="command 只支持 1（下发授权）/ 2（解除授权）", data=None)
@@ -694,7 +699,7 @@ async def set_cooperative_authorization(body: CooperativeAuthorizationRequest):
         body.vehicle_vid,
         source=body.source or 1,
         command=body.command,
-        vehicles=body.vehicles,
+        vehicles=[v.model_dump() for v in body.vehicles] if body.vehicles else None,
         target_type=body.target_type,
         priorities=body.priorities,
     )

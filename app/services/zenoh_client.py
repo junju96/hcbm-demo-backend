@@ -44,6 +44,16 @@ _message_callbacks: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
 _default_topics: List[str] = []
 _feedback_buffers: Dict[str, List[Dict[str, Any]]] = {}
 _feedback_buffer_lock = threading.Lock()
+# 反馈消息业务监听器：_on_feedback_message 统一记录/缓存后逐个回调。
+# 注意底层 subscribe_topic 对已订阅 topic 会整体替换 handler，业务方不能绕过
+# 该回调直接再 subscribe 同 topic，必须注册到这里。
+_feedback_listeners: List[Callable[[Dict[str, Any]], None]] = []
+
+
+def register_feedback_listener(callback: Callable[[Dict[str, Any]], None]) -> None:
+    """注册车辆反馈消息监听器（收到 ack/task_received_status/mission_status 等反馈时回调）。"""
+    if callback not in _feedback_listeners:
+        _feedback_listeners.append(callback)
 FEEDBACK_BUFFER_SIZE = 200
 
 
@@ -261,6 +271,13 @@ def _on_feedback_message(message: Dict[str, Any]) -> None:
         # 只保留最近 N 条
         if len(_feedback_buffers[topic]) > FEEDBACK_BUFFER_SIZE:
             _feedback_buffers[topic] = _feedback_buffers[topic][-FEEDBACK_BUFFER_SIZE:]
+
+    # 业务监听器（如 task_received_status → SSE 推送前端）
+    for listener in list(_feedback_listeners):
+        try:
+            listener(message)
+        except Exception as exc:
+            _zenoh_log("ERROR", f"feedback listener error on '{topic}': {exc}")
 
 
 def get_feedback_messages(topic_pattern: str, limit: int = 50) -> List[Dict[str, Any]]:

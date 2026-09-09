@@ -14,7 +14,7 @@ from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
 from app.services import zenoh_client
 from app.services import vehicle_control_client
-from app.services.action_sequence_client import init_plan_change_subscription
+from app.services.action_sequence_client import init_plan_change_subscription, init_task_received_listener
 
 
 @asynccontextmanager
@@ -33,6 +33,8 @@ async def lifespan(app: FastAPI):
         print("[ZK Backend] Zenoh ready. Vehicle feedback subscription is deferred until user selects a vehicle.")
         # 订阅 plan 变化主题，通过 SSE 推送给前端
         init_plan_change_subscription()
+        # 注册任务接收确认监听（task_received_status → SSE，供前端"方案已收到"提示）
+        init_task_received_listener()
     else:
         print(f"[ZK Backend] Zenoh init failed (may fall back to local-peer): {zenoh_client.get_last_zenoh_error()}")
 

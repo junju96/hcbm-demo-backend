@@ -2537,20 +2537,24 @@ def publish_control_mission(
 def build_cooperative_authorization_payload(
     source: int = 1,
     command: int = 1,
-    vehicles: Optional[List[int]] = None,
+    vehicles: Optional[List[Dict[str, Any]]] = None,
     target_type: Optional[int] = None,
     priorities: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """构建 MissionService set_cooperative_authorization 的 payload（0x02A20808）。
 
-    command=1 下发授权：携带 vehicles（协同车辆 VMF 列表）/ target_type / priorities；
-    command=2 解除授权：只携带 source 与 command 两个参数。
+    注意：command=2（解除授权）也必须携带 vehicles / target_type / priorities 完整字段——
+    二进制协议（0x02A20808）报文字段齐全，MissionService 对缺字段的 JSON 会直接丢弃
+    不回 ack（2026-09-09 实测：command=2 只带 source/command 时 zenoh 侧无响应）。
+    解除授权时应回传下发授权时的同一组参数。
     """
-    args: Dict[str, Any] = {"source": source, "command": command}
-    if command == 1:
-        args["vehicles"] = list(vehicles or [])
-        args["target_type"] = target_type if target_type is not None else 0
-        args["priorities"] = list(priorities or [])
+    args: Dict[str, Any] = {
+        "source": source,
+        "command": command,
+        "vehicles": list(vehicles or []),
+        "target_type": target_type if target_type is not None else 0,
+        "priorities": list(priorities or []),
+    }
     return {
         "service": "MissionService",
         "action": "set_cooperative_authorization",
@@ -2562,7 +2566,7 @@ def publish_cooperative_authorization(
     vehicle_vid: str,
     source: int = 1,
     command: int = 1,
-    vehicles: Optional[List[int]] = None,
+    vehicles: Optional[List[Dict[str, Any]]] = None,
     target_type: Optional[int] = None,
     priorities: Optional[List[int]] = None,
 ) -> tuple[bool, str]:
@@ -3580,5 +3584,40 @@ def init_plan_change_subscription() -> bool:
     else:
         print(f"[AS-ZENOH] subscribe plan change topics failed: update={ok1}, count={ok2}")
     return ok1 and ok2
+
+
+# ==================== 任务接收确认（task_received_status）→ SSE 推送 ====================
+
+TASK_RECEIVED_TOPIC_SUFFIX = "/mission/task_received_status"
+
+
+def _on_task_received_status(message: Dict[str, Any]) -> None:
+    """车辆反馈监听器：任务接收确认（0x22230901）到达时通过 SSE 推送给前端。
+
+    选择操控车辆时 subscribe_vehicle_feedbacks 已订阅对应车辆的
+    op/t01/g01/v{vid}/mission/task_received_status topic，这里只负责把确认事件
+    透传给前端，用于操控席行动序列详情的"方案已收到"发布状态提示。
+    """
+    topic = message.get("topic", "")
+    if not topic.endswith(TASK_RECEIVED_TOPIC_SUFFIX):
+        return
+    payload = _parse_zenoh_payload(message)
+    tid = payload.get("tid")
+    if tid is None:
+        return
+    print(f"[AS-ZENOH] task_received_status: topic={topic} | tid={tid} | vehicle={payload.get('vehicle_id')}")
+    _push_plan_sse_event("action_sequence.task_received", {
+        "tid": tid,
+        "vehicle_id": payload.get("vehicle_id") or "",
+        "vmf": payload.get("VMF"),
+        "recv_num": payload.get("recv_num"),
+        "received_aids": payload.get("received_aids") or [],
+        "topic": topic,
+    })
+
+
+def init_task_received_listener() -> None:
+    """注册任务接收确认监听器（车辆反馈 topic 的订阅在 select-vehicle 时完成）。"""
+    zenoh_client.register_feedback_listener(_on_task_received_status)
 
 
