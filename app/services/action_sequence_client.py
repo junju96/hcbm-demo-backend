@@ -508,8 +508,23 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
             "state": state,
             "teams_count": len(item.get("teams") or []),
             "stages_count": len(stages),
+            "vehicle_summary": _build_vehicle_summary_brief(item),
         })
     return result
+
+
+def _build_vehicle_summary_brief(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """列表接口用的轻量 vehicle_summary：仅 vid + resource_type。
+
+    复用详情接口的同一套车型判定（teams > 在线车辆缓存 > vid 前缀 > action_type），
+    供前端按车型过滤，避免对每个 plan 再拉一次详情（N+1）。
+    """
+    car_actions = _build_car_actions_from_plan(plan)
+    full = _to_frontend_plan(plan, car_actions)
+    return [
+        {"vid": v.get("vid", ""), "resource_type": v.get("resource_type", "")}
+        for v in full.get("vehicle_summary", [])
+    ]
 
 
 def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
@@ -873,6 +888,7 @@ def _infer_action_type_from_name(name: str) -> str:
         "强光拒止": "light-expel",
         "电磁侦察": "em-recon",
         "电磁突击": "em-assault",
+        "侦察干扰": "em-assault",
         "电磁干扰": "em-interference",
         "载荷静默": "payload-silent",
     }
@@ -1070,6 +1086,19 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
             if vdata["resource_type"]:
                 break
 
+    # 编队机动方案：头车（action.param.is_leader 标记）排在 vehicle_summary 第一行。
+    # DS 投影会把嵌套 car_actions 按资源 id 重排，teams.vehicles 顺序在投影中丢失，
+    # 顺序信息只能靠 action 业务字段携带。
+    def _is_leader(vdata: Dict[str, Any]) -> bool:
+        for st in vdata.get("stages", []):
+            for a in st.get("actions", []):
+                p = a.get("param") or {}
+                if isinstance(p, dict) and p.get("is_leader"):
+                    return True
+        return False
+
+    ordered_vehicles = sorted(vehicle_map.values(), key=lambda v: 0 if _is_leader(v) else 1)
+
     # title fallback：plan.title -> tactic.title -> plan_id
     tactic = plan.get("tactic") or {}
     if not isinstance(tactic, dict):
@@ -1091,7 +1120,7 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
         "teams": plan.get("teams", []),
         "targets": plan.get("targets", []),
         "car_actions": car_actions,
-        "vehicle_summary": list(vehicle_map.values()),
+        "vehicle_summary": ordered_vehicles,
     }
 
 
@@ -1627,7 +1656,7 @@ def _action_name_to_sid(name: str) -> int:
         return 55
     if "电磁侦察" in n or "电侦" in n or "频谱" in n:
         return 41
-    if "电磁突击" in n or "电磁压制" in n:
+    if "电磁突击" in n or "电磁压制" in n or "侦察干扰" in n:
         return 42
     if "电磁干扰" in n or "干扰" in n:
         return 43
@@ -1774,6 +1803,25 @@ def _build_path_points(points):
     return result
 
 
+def _build_formation_points(points):
+    """编队机动（sid=7）路径点：经纬高 + 相对头车的横/纵向偏移，不带 radius/type。"""
+    result = []
+    for pt in points or []:
+        if not isinstance(pt, dict):
+            continue
+        lon = pt.get("lon") if pt.get("lon") is not None else pt.get("longitude", 0)
+        lat = pt.get("lat") if pt.get("lat") is not None else pt.get("latitude", 0)
+        alt = pt.get("alt") if pt.get("alt") is not None else pt.get("altitude", 0)
+        result.append({
+            "lon": _coord_to_int(lon),
+            "lat": _coord_to_int(lat),
+            "alt": _coord_to_int(alt),
+            "offsetX": pt.get("offsetX", 0),
+            "offsetY": pt.get("offsetY", 0),
+        })
+    return result
+
+
 def _build_area_points(points):
     """侦察/电磁区域点：lon/lat/alt 以 10^6 缩放后的整数形式下发。"""
     result = []
@@ -1916,7 +1964,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     if sid == 7:
         return {
             "sid": 7,
-            "points": _build_path_points(param.get("points")),
+            "points": _build_formation_points(param.get("points")),
             "limited_speed": param.get("limited_speed", 20),
             "formation_mode": param.get("formation_mode", 0),
             "safe_mode": param.get("safe_mode", 0),
@@ -2483,6 +2531,189 @@ def publish_control_mission(
         return False, f"Zenoh 下发失败: {err}"
 
 
+# ==================== MissionService set_cooperative_authorization 相关 ====================
+
+
+def build_cooperative_authorization_payload(
+    source: int = 1,
+    command: int = 1,
+    vehicles: Optional[List[int]] = None,
+    target_type: Optional[int] = None,
+    priorities: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """构建 MissionService set_cooperative_authorization 的 payload（0x02A20808）。
+
+    command=1 下发授权：携带 vehicles（协同车辆 VMF 列表）/ target_type / priorities；
+    command=2 解除授权：只携带 source 与 command 两个参数。
+    """
+    args: Dict[str, Any] = {"source": source, "command": command}
+    if command == 1:
+        args["vehicles"] = list(vehicles or [])
+        args["target_type"] = target_type if target_type is not None else 0
+        args["priorities"] = list(priorities or [])
+    return {
+        "service": "MissionService",
+        "action": "set_cooperative_authorization",
+        "args": args,
+    }
+
+
+def publish_cooperative_authorization(
+    vehicle_vid: str,
+    source: int = 1,
+    command: int = 1,
+    vehicles: Optional[List[int]] = None,
+    target_type: Optional[int] = None,
+    priorities: Optional[List[int]] = None,
+) -> tuple[bool, str]:
+    """通过 Zenoh 向本车发送 set_cooperative_authorization。
+
+    Args:
+        vehicle_vid: 本车 vid（topic 中的车辆；会去掉 equipment: 前缀）
+        command: 1=下发授权，2=解除授权
+
+    Returns:
+        (success, message)
+    """
+    import json
+
+    vid = vehicle_vid.replace("equipment:", "") if vehicle_vid else vehicle_vid
+    topic = f"op/t01/g01/v{vid}/cmd/MissionService/set_cooperative_authorization"
+    payload = build_cooperative_authorization_payload(source, command, vehicles, target_type, priorities)
+    print(f"[ZENOH-COOP] topic={topic} | payload={json.dumps(payload, ensure_ascii=False)}")
+
+    ok = zenoh_client.publish(topic, payload)
+    if ok:
+        action_text = "下发授权" if command == 1 else "解除授权"
+        return True, f"set_cooperative_authorization({action_text}) 已下发 | topic={topic}"
+    err = zenoh_client.get_last_zenoh_error()
+    print(f"[ZENOH-COOP] publish failed: {err}")
+    return False, f"Zenoh 下发失败: {err}"
+
+
+# ==================== MissionService send_formation_mission 相关 ====================
+
+
+def _is_formation_move_action(action: Dict[str, Any]) -> bool:
+    """判断 action 是否为编队机动元任务。
+
+    兼容 DS 投影把 action_type 写成 Unknown_Action 的情况：依次按
+    action_type / param 结构 / 名称 推断。
+    """
+    at = (action.get("action_type") or "").strip().lower()
+    if at == "formation-move":
+        return True
+    if _infer_action_type_from_param(action.get("param")) == "formation-move":
+        return True
+    name = action.get("action_name") or action.get("name") or ""
+    return _infer_action_type_from_name(name) == "formation-move"
+
+
+def _extract_formation_sub_plan(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+    """从 plan 中抽取仅含编队机动行动的子 plan（供 send_formation_mission 构建 payload）。
+
+    - 只保留含编队机动行动的车辆（car_actions），且每车只保留编队机动行动
+    - 头车（param.is_leader 为真）排在 car_actions 第一位：DS 投影会按资源 id
+      重排 car_actions，顺序信息只能靠业务字段（is_leader）恢复
+    - vehicle_summary 直接剔除，避免 build_mission_data 把非编队行动重复拉入
+
+    Returns:
+        (子 plan, 头车 vid 或 None)
+    """
+    sub = copy.deepcopy(plan)
+    sub.pop("vehicle_summary", None)
+    leader_vid: Optional[str] = None
+    for stage in sub.get("stages", []) or []:
+        team_actions = stage.get("team_actions")
+        if isinstance(team_actions, dict):
+            team_actions = [
+                {"team_id": team_id, "car_actions": vehicles}
+                for team_id, vehicles in team_actions.items()
+            ]
+            stage["team_actions"] = team_actions
+        if not isinstance(team_actions, list):
+            continue
+        for ta in team_actions:
+            key = "car_actions" if "car_actions" in ta else "team_actions"
+            kept = []
+            for ca in ta.get(key) or []:
+                actions = [a for a in (ca.get("actions") or []) if _is_formation_move_action(a)]
+                if not actions:
+                    continue
+                ca["actions"] = actions
+                if leader_vid is None and any((a.get("param") or {}).get("is_leader") for a in actions):
+                    leader_vid = ca.get("vid")
+                kept.append(ca)
+            ta[key] = kept
+    # 第二遍统一排序：保证头车在所有 car_actions 中排第一（含跨 team 的兜底场景）
+    if leader_vid:
+        for stage in sub.get("stages", []) or []:
+            for ta in stage.get("team_actions", []) or []:
+                for key in ("car_actions", "team_actions"):
+                    if isinstance(ta.get(key), list):
+                        ta[key].sort(key=lambda ca: 0 if ca.get("vid") == leader_vid else 1)
+    return sub, leader_vid
+
+
+def build_formation_mission_payload(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+    """构建 MissionService send_formation_mission payload。
+
+    payload 结构与 send_mission 相同（args.mission_data.task），
+    vehicles 数组头车排第一，且只包含编队机动行动。
+
+    Returns:
+        (payload, 编队车辆 vid 列表（与 vehicles 同序，头车在前）, 头车 vid 或 None)
+    """
+    sub, leader_vid = _extract_formation_sub_plan(plan)
+    mission_data = build_mission_data(sub)
+    vids_in_order: List[str] = []
+    for stage in sub.get("stages", []) or []:
+        for ta in stage.get("team_actions", []) or []:
+            for ca in (ta.get("car_actions") or ta.get("team_actions") or []):
+                if ca.get("actions"):
+                    vids_in_order.append(ca.get("vid", ""))
+    payload = {
+        "service": "MissionService",
+        "action": "send_formation_mission",
+        "args": {"mission_data": mission_data},
+    }
+    return payload, vids_in_order, leader_vid
+
+
+def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
+    """协同席下发的附加逻辑：plan 含编队机动元任务时，通过 Zenoh 发送 send_formation_mission。
+
+    与 send_mission 的按车下发方式一致：向编队内每辆车的 cmd topic 各发一次相同
+    payload，payload 的 vehicles 数组头车排第一。该附加发送失败不影响原下发结果。
+    """
+    plan = get_plan_detail(plan_id)
+    if not plan:
+        return {"sent": False, "reason": "plan not found"}
+    payload, vids, leader_vid = build_formation_mission_payload(plan)
+    if not vids:
+        return {"sent": False, "reason": "no formation-move action"}
+    tid = payload["args"]["mission_data"]["task"]["tid"]
+    topics: List[str] = []
+    all_ok = True
+    for vid in vids:
+        clean_vid = vid.replace("equipment:", "") if vid else vid
+        topic = f"op/t01/g01/v{clean_vid}/cmd/MissionService/send_formation_mission"
+        ok = zenoh_client.publish(topic, payload)
+        all_ok = all_ok and ok
+        topics.append(topic)
+        print(f"[ZENOH-FORMATION] topic={topic} | ok={ok} | tid={tid} | leader={leader_vid}")
+    if not all_ok:
+        print(f"[ZENOH-FORMATION] last zenoh error: {zenoh_client.get_last_zenoh_error()}")
+    return {
+        "sent": True,
+        "ok": all_ok,
+        "topics": topics,
+        "leader_vid": leader_vid,
+        "tid": tid,
+        "vehicle_count": len(vids),
+    }
+
+
 # ========== 车辆类型与资源池映射 ==========
 
 VEHICLE_TYPE_DISPLAY_NAMES = {
@@ -2716,6 +2947,7 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
             "state": state,
             "teams_count": len(item.get("teams") or []),
             "stages_count": len(item.get("stages") or []),
+            "vehicle_summary": _build_vehicle_summary_brief(item),
         })
     return result
 

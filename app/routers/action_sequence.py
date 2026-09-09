@@ -31,6 +31,7 @@ from app.services.action_sequence_client import (
     action_runtime,
     build_mission_payload,
     publish_control_mission,
+    publish_cooperative_authorization,
     query_plans_operator,
     get_plan_detail_operator,
     import_plan_to_operator,
@@ -44,6 +45,7 @@ from app.services.action_sequence_client import (
     delete_vehicle_operator,
     delete_vehicle,
     dispatch_plan_forward,
+    publish_formation_mission_if_any,
     notify_plan_map_clicked_coordinator,
     notify_plan_map_clicked_operator,
     PLAN_SSE_SCOPE,
@@ -77,6 +79,15 @@ class DispatchRequest(BaseModel):
 class DispatchForwardRequest(BaseModel):
     target_ips: List[str]
     timeout_seconds: Optional[int] = 30
+
+
+class CooperativeAuthorizationRequest(BaseModel):
+    vehicle_vid: str                       # 本车 vid（topic 中的车辆）
+    source: Optional[int] = 1              # 来源类型，默认 1
+    command: int                           # 1=下发授权，2=解除授权
+    vehicles: Optional[List[int]] = None   # 协同车辆 VMF 列表（command=1 时携带）
+    target_type: Optional[int] = None      # 首要监视目标（command=1 时携带）
+    priorities: Optional[List[int]] = None  # 重点目标类型（command=1 时携带）
 
 
 class ActionParamUpdateRequest(BaseModel):
@@ -301,10 +312,22 @@ async def stop_plan(plan_id: str):
 
 @router.post("/action-sequences/plans/{plan_id}/dispatch-forward", response_model=ApiResponse)
 async def dispatch_plan_forward_route(plan_id: str, body: DispatchForwardRequest):
-    """协同席 — 将行动方案通过数据服务器 /ingestion/forward 下发到指定席位。"""
+    """协同席 — 将行动方案通过数据服务器 /ingestion/forward 下发到指定席位。
+
+    附加逻辑：方案包含编队机动元任务时，在原下发逻辑基础上通过 Zenoh
+    追加一次 MissionService/send_formation_mission（vehicles 头车排第一）；
+    附加发送失败不影响原下发结果，结果挂在响应 data.formation_mission 上。
+    """
     result = dispatch_plan_forward(plan_id, body.target_ips, body.timeout_seconds or 30)
     if not result.get("ok"):
         return ApiResponse(code=500, message=result.get("error") or "下发失败", data=result)
+    try:
+        formation = publish_formation_mission_if_any(plan_id)
+        if formation.get("sent"):
+            result["formation_mission"] = formation
+    except Exception as e:
+        print(f"[DISPATCH-FORWARD] send_formation_mission failed: {e}")
+        result["formation_mission"] = {"sent": False, "ok": False, "error": str(e)}
     return ApiResponse(data=result)
 
 
@@ -650,6 +673,38 @@ async def stop_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(No
         "plan_id": plan_id, "action": "stop", "state": "SCHEDULED",
         "message": "行动序列已停止并重置",
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
+
+
+@router.post("/action-sequences/operator/cooperative-authorization", response_model=ApiResponse)
+async def set_cooperative_authorization(body: CooperativeAuthorizationRequest):
+    """操控端 — 协同任务授权下发/解除（MissionService set_cooperative_authorization, 0x02A20808）。
+
+    command=1 下发授权：携带 vehicles（协同车辆 VMF 列表）/ target_type / priorities；
+    command=2 解除授权：只携带 source 与 command。
+    """
+    if body.command not in (1, 2):
+        return ApiResponse(code=400, message="command 只支持 1（下发授权）/ 2（解除授权）", data=None)
+    if not body.vehicle_vid:
+        return ApiResponse(code=400, message="缺少本车 vehicle_vid", data=None)
+    if body.command == 1 and not body.vehicles:
+        return ApiResponse(code=400, message="下发授权需至少选择一辆协同车辆", data=None)
+
+    zenoh_ok, zenoh_msg = publish_cooperative_authorization(
+        body.vehicle_vid,
+        source=body.source or 1,
+        command=body.command,
+        vehicles=body.vehicles,
+        target_type=body.target_type,
+        priorities=body.priorities,
+    )
+    if not zenoh_ok:
+        return ApiResponse(code=500, message=zenoh_msg, data=None)
+    return ApiResponse(data={
+        "action": "set_cooperative_authorization",
+        "command": body.command,
+        "vehicle_vid": body.vehicle_vid.replace("equipment:", ""),
+        "message": zenoh_msg,
     })
 
 
