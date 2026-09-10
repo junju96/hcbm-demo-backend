@@ -35,10 +35,13 @@ def _infer_resource_type_from_vid(vid: str) -> str:
 
     支持真实装备编号前缀：
       ZD/Recon-Strike-UGV, XL/Patrol-UGV, HL/Fire-Support-UGV,
-      DC/Electronic-UGV, DD/Electronic-UGV(兼容), KD/Air-Ground-UAV
+      DC/Electronic-UGV, DD/Electronic-UGV(兼容), KD/Air-Ground-UAV,
+      CK/Remote-Control-Car(远程操控车)
     """
     v = (vid or "").lower()
     # 真实装备编号前缀
+    if re.search(r"(^|[:_-])ck\d", v):
+        return "Remote-Control-Car"
     if re.search(r"(^|[:_-])zd\d", v):
         return "Recon-Strike-UGV"
     if re.search(r"(^|[:_-])xl\d", v):
