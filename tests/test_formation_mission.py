@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""send_formation_mission 测试 — 编队行动抽取、头车排序、payload 构建与 Zenoh 下发"""
+"""编队机动任务下发测试 — 编队行动抽取、头车排序、body 构建与 HTTP POST 下发"""
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from app.services import action_sequence_client as asc
 
@@ -98,18 +98,16 @@ class TestExtractFormationSubPlan(unittest.TestCase):
         self.assertEqual(kept[0]["actions"][0]["action_type"], "formation-move")
 
 
-class TestBuildFormationMissionPayload(unittest.TestCase):
-    def test_payload_structure_and_leader_first(self):
+class TestBuildFormationMissionBody(unittest.TestCase):
+    def test_body_structure_and_leader_first(self):
         plan = _plan([
             ("DC01", [_formation_action()]),
             ("ZD01", [_formation_action(is_leader=True)]),
         ])
         m1, m2, m3 = _mock_vehicle_lookups()
         with m1, m2, m3:
-            payload, vids, leader = asc.build_formation_mission_payload(plan)
-        self.assertEqual(payload["service"], "MissionService")
-        self.assertEqual(payload["action"], "send_formation_mission")
-        task = payload["args"]["mission_data"]["task"]
+            body, vids, leader = asc.build_formation_mission_body(plan)
+        task = body["task"]
         self.assertEqual([v["vid"] for v in task["vehicles"]], [_VMFS["ZD01"], _VMFS["DC01"]])
         self.assertEqual(vids, ["ZD01", "DC01"])
         self.assertEqual(leader, "ZD01")
@@ -130,37 +128,39 @@ class TestPublishFormationMissionIfAny(unittest.TestCase):
             result = asc.publish_formation_mission_if_any("plan-x")
         self.assertFalse(result["sent"])
 
-    def test_publish_to_each_vehicle_leader_first(self):
+    def test_post_to_formation_service_leader_first(self):
         plan = _plan([
             ("DC01", [_formation_action()]),
             ("ZD01", [_formation_action(is_leader=True)]),
         ])
+        resp = MagicMock(ok=True, status_code=200)
+        resp.json.return_value = {"code": 0}
         m1, m2, m3 = _mock_vehicle_lookups()
         with patch.object(asc, "get_plan_detail", return_value=plan), m1, m2, m3, \
-             patch.object(asc.zenoh_client, "publish", return_value=True) as mock_pub:
+             patch.object(asc.requests, "post", return_value=resp) as mock_post:
             result = asc.publish_formation_mission_if_any("plan-000099")
         self.assertTrue(result["sent"])
         self.assertTrue(result["ok"])
+        self.assertEqual(result["status_code"], 200)
         self.assertEqual(result["leader_vid"], "ZD01")
-        topics = [c.args[0] for c in mock_pub.call_args_list]
-        self.assertEqual(topics, [
-            "op/t01/g01/vZD01/cmd/MissionService/send_formation_mission",
-            "op/t01/g01/vDC01/cmd/MissionService/send_formation_mission",
-        ])
-        payload = mock_pub.call_args_list[0].args[1]
-        self.assertEqual(payload["action"], "send_formation_mission")
-        vehicles = payload["args"]["mission_data"]["task"]["vehicles"]
+        self.assertEqual(result["vehicle_count"], 2)
+        # 只 POST 一次到编队任务下发接口，body 直接是 {"task": ...}
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args.args[0], asc.FORMATION_MISSION_SEND_URL)
+        body = mock_post.call_args.kwargs["json"]
+        vehicles = body["task"]["vehicles"]
         self.assertEqual(vehicles[0]["vid"], _VMFS["ZD01"])
+        self.assertEqual(vehicles[1]["vid"], _VMFS["DC01"])
 
-    def test_publish_partial_failure(self):
+    def test_post_failure(self):
         plan = _plan([("ZD01", [_formation_action(is_leader=True)])])
         m1, m2, m3 = _mock_vehicle_lookups()
         with patch.object(asc, "get_plan_detail", return_value=plan), m1, m2, m3, \
-             patch.object(asc.zenoh_client, "publish", return_value=False), \
-             patch.object(asc.zenoh_client, "get_last_zenoh_error", return_value="boom"):
+             patch.object(asc.requests, "post", side_effect=Exception("boom")):
             result = asc.publish_formation_mission_if_any("plan-000099")
         self.assertTrue(result["sent"])
         self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "boom")
 
 
 if __name__ == "__main__":

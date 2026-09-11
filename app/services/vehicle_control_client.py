@@ -1,6 +1,6 @@
 """
 车辆控制服务客户端
-维护从 vehicle_control_service (默认 http://25.11.1.2:28430) 获取的在线车辆信息缓存。
+维护从车辆信息服务（见 app/config.py 的 VEHICLE_INFO_ALL_BASE_URL）获取的在线车辆信息缓存。
 
 职责：
   1. 提供 query_vehicle_info_all() 拉取 /vehicle/info/all

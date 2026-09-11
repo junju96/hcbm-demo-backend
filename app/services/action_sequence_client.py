@@ -18,6 +18,13 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+from app.config import FORMATION_MISSION_SEND_URL
 from app.services.data_server_client import (
     _http_get, _http_post, _http_patch,
     _http_get_operator, _http_post_operator, _http_patch_operator,
@@ -990,13 +997,23 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
                 vid = v["vid"]
                 rt = v.get("resource_type") or team_resource_type or ""
                 if not rt:
-                    rt = _online_vehicle_type_cache.get(vid) or _infer_resource_type_from_vid(vid) or ""
+                    rt = (
+                        _online_vehicle_type_cache.get(vid)
+                        or _infer_resource_type_from_vid(vid)
+                        or _lookup_vehicle_type_from_resource_pool(vid)
+                        or ""
+                    )
                 team_type_map[vid] = rt
             elif isinstance(v, str):
                 # 数据服务器 team_equipments 仅返回 vid 字符串时，
                 # 优先查在线车辆缓存，其次根据 vid 前缀推断。
                 cached = _online_vehicle_type_cache.get(v)
-                team_type_map[v] = cached or _infer_resource_type_from_vid(v) or ""
+                team_type_map[v] = (
+                    cached
+                    or _infer_resource_type_from_vid(v)
+                    or _lookup_vehicle_type_from_resource_pool(v)
+                    or ""
+                )
         if team.get("vid"):
             team_type_map[team["vid"]] = team_resource_type or team_type_map.get(team["vid"], "") or ""
 
@@ -1005,11 +1022,12 @@ def _to_frontend_plan(plan: Dict[str, Any], car_actions: List[Dict[str, Any]]) -
     for ca in car_actions:
         vid = ca["vid"]
         if vid not in vehicle_map:
-            # 车型判断优先级：plan.teams > 在线车辆缓存 > vid 前缀推断 > action_type 兜底
+            # 车型判断优先级：plan.teams > 在线车辆缓存 > vid 前缀推断 > 资源池单查 > action_type 兜底
             resource_type = (
                 team_type_map.get(vid)
                 or _online_vehicle_type_cache.get(vid)
                 or _infer_resource_type_from_vid(vid)
+                or _lookup_vehicle_type_from_resource_pool(vid)
                 or ""
             )
             vehicle_map[vid] = {
@@ -2598,7 +2616,7 @@ def publish_cooperative_authorization(
     return False, f"Zenoh 下发失败: {err}"
 
 
-# ==================== MissionService send_formation_mission 相关 ====================
+# ==================== 编队机动任务下发（POST /formation/mission/send）相关 ====================
 
 
 def _is_formation_move_action(action: Dict[str, Any]) -> bool:
@@ -2617,7 +2635,7 @@ def _is_formation_move_action(action: Dict[str, Any]) -> bool:
 
 
 def _extract_formation_sub_plan(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
-    """从 plan 中抽取仅含编队机动行动的子 plan（供 send_formation_mission 构建 payload）。
+    """从 plan 中抽取仅含编队机动行动的子 plan（供编队任务下发构建 body）。
 
     - 只保留含编队机动行动的车辆（car_actions），且每车只保留编队机动行动
     - 头车（param.is_leader 为真）排在 car_actions 第一位：DS 投影会按资源 id
@@ -2662,14 +2680,14 @@ def _extract_formation_sub_plan(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], O
     return sub, leader_vid
 
 
-def build_formation_mission_payload(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
-    """构建 MissionService send_formation_mission payload。
+def build_formation_mission_body(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str], Optional[str]]:
+    """构建编队机动任务下发的 HTTP 请求体。
 
-    payload 结构与 send_mission 相同（args.mission_data.task），
+    body 为 {"task": ...}（与 mission_data 结构一致），
     vehicles 数组头车排第一，且只包含编队机动行动。
 
     Returns:
-        (payload, 编队车辆 vid 列表（与 vehicles 同序，头车在前）, 头车 vid 或 None)
+        (body, 编队车辆 vid 列表（与 vehicles 同序，头车在前）, 头车 vid 或 None)
     """
     sub, leader_vid = _extract_formation_sub_plan(plan)
     mission_data = build_mission_data(sub)
@@ -2679,46 +2697,53 @@ def build_formation_mission_payload(plan: Dict[str, Any]) -> Tuple[Dict[str, Any
             for ca in (ta.get("car_actions") or ta.get("team_actions") or []):
                 if ca.get("actions"):
                     vids_in_order.append(ca.get("vid", ""))
-    payload = {
-        "service": "MissionService",
-        "action": "send_formation_mission",
-        "args": {"mission_data": mission_data},
-    }
-    return payload, vids_in_order, leader_vid
+    return mission_data, vids_in_order, leader_vid
 
 
 def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
-    """协同席下发的附加逻辑：plan 含编队机动元任务时，通过 Zenoh 发送 send_formation_mission。
+    """协同席下发的附加逻辑：plan 含编队机动元任务时，POST 到编队任务下发接口。
 
-    与 send_mission 的按车下发方式一致：向编队内每辆车的 cmd topic 各发一次相同
-    payload，payload 的 vehicles 数组头车排第一。该附加发送失败不影响原下发结果。
+    POST FORMATION_MISSION_SEND_URL（车辆管理/编队服务 25.11.1.3:28410
+    /formation/mission/send），body 为 {"task": ...}，vehicles 数组头车排第一。
+    该附加发送失败不影响原下发结果。
     """
     plan = get_plan_detail(plan_id)
     if not plan:
         return {"sent": False, "reason": "plan not found"}
-    payload, vids, leader_vid = build_formation_mission_payload(plan)
+    body, vids, leader_vid = build_formation_mission_body(plan)
     if not vids:
         return {"sent": False, "reason": "no formation-move action"}
-    tid = payload["args"]["mission_data"]["task"]["tid"]
-    topics: List[str] = []
-    all_ok = True
-    for vid in vids:
-        clean_vid = vid.replace("equipment:", "") if vid else vid
-        topic = f"op/t01/g01/v{clean_vid}/cmd/MissionService/send_formation_mission"
-        ok = zenoh_client.publish(topic, payload)
-        all_ok = all_ok and ok
-        topics.append(topic)
-        print(f"[ZENOH-FORMATION] topic={topic} | ok={ok} | tid={tid} | leader={leader_vid}")
-    if not all_ok:
-        print(f"[ZENOH-FORMATION] last zenoh error: {zenoh_client.get_last_zenoh_error()}")
-    return {
+    tid = body["task"]["tid"]
+    result: Dict[str, Any] = {
         "sent": True,
-        "ok": all_ok,
-        "topics": topics,
+        "ok": False,
+        "url": FORMATION_MISSION_SEND_URL,
         "leader_vid": leader_vid,
         "tid": tid,
         "vehicle_count": len(vids),
     }
+    if not HAS_REQUESTS:
+        result["sent"] = False
+        result["error"] = "requests not available"
+        return result
+    try:
+        resp = requests.post(
+            FORMATION_MISSION_SEND_URL,
+            json=body,
+            timeout=10,
+            proxies={"http": None, "https": None},
+        )
+        result["ok"] = resp.ok
+        result["status_code"] = resp.status_code
+        print(f"[FORMATION-HTTP] POST {FORMATION_MISSION_SEND_URL} | status={resp.status_code} | tid={tid} | leader={leader_vid} | vehicles={vids}")
+        try:
+            result["response"] = resp.json()
+        except Exception:
+            result["response_text"] = resp.text[:500]
+    except Exception as e:
+        result["error"] = str(e)
+        print(f"[FORMATION-HTTP] POST {FORMATION_MISSION_SEND_URL} failed | tid={tid} | error={e}")
+    return result
 
 
 # ========== 车辆类型与资源池映射 ==========
@@ -2729,6 +2754,9 @@ VEHICLE_TYPE_DISPLAY_NAMES = {
     "Patrol-UGV": "巡逻车",
     "Electronic-UGV": "电磁车",
     "Air-Ground-UAV": "空地车",
+    # 远程操控车（CK车）：规范值 Remote-Control-Car，历史数据兼容 Control-UGV
+    "Remote-Control-Car": "操控车",
+    "Control-UGV": "操控车",
 }
 
 # 各车型默认支持的载荷 action_type（用于前端新建行动序列时初始化节点）。
@@ -2748,6 +2776,8 @@ VEHICLE_ACTION_TYPES = {
     ],
     "Electronic-UGV": ["EM-Recon", "EM-Assault", "EM-Interference", "Payload-Silent"],
     "Air-Ground-UAV": ["Air-Recon"],
+    # 远程操控车：仅自主机动 + 编队机动（装备行动序列知识 第 7 节）
+    "Remote-Control-Car": ["Auto-Move", "Formation-Move"],
 }
 
 # 资源池返回的 resource_type / model_type.description -> 内部车型映射
@@ -2760,6 +2790,9 @@ _RESOURCE_TYPE_TO_VEHICLE = {
     "EM-UGV": "Electronic-UGV",
     "Air-Ground-UAV": "Air-Ground-UAV",
     "KD-UGV": "Air-Ground-UAV",
+    # 远程操控车（CK车）
+    "Remote-Control-Car": "Remote-Control-Car",
+    "Control-UGV": "Remote-Control-Car",
     # 中文描述兜底
     "无人火力车": "Fire-Support-UGV",
     "无人侦察车": "Recon-Strike-UGV",
@@ -2805,6 +2838,30 @@ def _infer_vehicle_type(equipment: Dict[str, Any]) -> str:
 # 在 _fetch_vehicles_from_resource_pool 调用时更新，用于 _to_frontend_plan
 # 中 teams 只有 vid 字符串时也能正确识别车型。
 _online_vehicle_type_cache: Dict[str, str] = {}
+
+# 单查资源池得到的 vid（去 equipment: 前缀）-> resource_type 缓存；仅缓存成功结果，失败下次重试
+_single_vehicle_type_cache: Dict[str, str] = {}
+
+
+def _lookup_vehicle_type_from_resource_pool(vid: str) -> str:
+    """按 vid 单查资源池 equipment 记录推断车型。
+
+    用于 plan 数据无 resource_type 且 vid 无前缀特征（如操控车 vid=00）的场景；
+    资源池单条查询不受 CK 车默认过滤影响（见 resource_pool_CK车查询接口说明）。
+    """
+    clean = (vid or "").replace("equipment:", "")
+    if not clean:
+        return ""
+    if clean in _single_vehicle_type_cache:
+        return _single_vehicle_type_cache[clean]
+    rt = ""
+    data = _http_get_resource_pool(f"/api/v1/resource_pool/resources/equipment:{clean}", silent=True)
+    if isinstance(data, dict):
+        inferred = _infer_vehicle_type(data)
+        rt = "" if inferred in ("", "Unknown") else inferred
+    if rt:
+        _single_vehicle_type_cache[clean] = rt
+    return rt
 
 
 def _transform_equipment_to_vehicle(equipment: Dict[str, Any]) -> Optional[Dict[str, Any]]:

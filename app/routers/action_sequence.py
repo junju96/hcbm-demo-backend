@@ -319,8 +319,8 @@ async def stop_plan(plan_id: str):
 async def dispatch_plan_forward_route(plan_id: str, body: DispatchForwardRequest):
     """协同席 — 将行动方案通过数据服务器 /ingestion/forward 下发到指定席位。
 
-    附加逻辑：方案包含编队机动元任务时，在原下发逻辑基础上通过 Zenoh
-    追加一次 MissionService/send_formation_mission（vehicles 头车排第一）；
+    附加逻辑：方案包含编队机动元任务时，在原下发逻辑基础上向编队任务服务
+    POST /formation/mission/send（body 为 {"task": ...}，vehicles 头车排第一）；
     附加发送失败不影响原下发结果，结果挂在响应 data.formation_mission 上。
     """
     result = dispatch_plan_forward(plan_id, body.target_ips, body.timeout_seconds or 30)
@@ -331,7 +331,7 @@ async def dispatch_plan_forward_route(plan_id: str, body: DispatchForwardRequest
         if formation.get("sent"):
             result["formation_mission"] = formation
     except Exception as e:
-        print(f"[DISPATCH-FORWARD] send_formation_mission failed: {e}")
+        print(f"[DISPATCH-FORWARD] formation mission send failed: {e}")
         result["formation_mission"] = {"sent": False, "ok": False, "error": str(e)}
     return ApiResponse(data=result)
 

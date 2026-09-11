@@ -16,8 +16,11 @@ OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.56:28801"
 RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"
 
 # ========== 车辆相关服务 ==========
-# 上游车辆管理服务（/vehicle/info/all 车辆实时信息）
-VEHICLE_INFO_ALL_BASE_URL = "http://25.11.1.147:28410"
+# 上游车辆管理服务（/vehicle/info/all 车辆实时信息、/formation/mission/send 编队任务下发）
+VEHICLE_INFO_ALL_BASE_URL = "http://25.11.1.3:28410"
+
+# 编队机动任务下发接口（POST，body 为 {"task": ...}，替代原 zenoh send_formation_mission）
+FORMATION_MISSION_SEND_URL = f"{VEHICLE_INFO_ALL_BASE_URL}/formation/mission/send"
 
 # 车辆控制服务（/user/current、/health 等）
 VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
