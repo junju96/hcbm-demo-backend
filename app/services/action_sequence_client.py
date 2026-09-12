@@ -645,10 +645,10 @@ def _parse_mission_start_end(param: Dict[str, Any], default_start: str, default_
 _STANDARD_ACTION_TYPES = {
     "auto-move", "follow-move", "silent-guard", "set-return-point", "return-to-base",
     "formation-move", "manual-task", "pose-adjust", "air-recon", "lens-recon",
-    "search-and-shoot", "recon-strike", "30mm-gun-launch", "at-missile-launch",
-    "gun-shot", "7.62mm-gun-shot", "rocket-launch", "loitering-munition-launch",
+    "recon-and-strike", "30mm-gun-strike", "at-missile-strike",
+    "machine-gun-strike", "rocket-strike", "loitering-munition-strike",
     "laser-illumination", "sound-expel", "acoustic-deterrence", "light-expel",
-    "light-deterrence", "em-recon", "electronic-recon", "em-assault", "electronic-assault",
+    "light-deterrence", "em-recon", "electronic-recon", "recon-and-interfere",
     "em-interference", "electronic-jamming", "payload-silent",
 }
 
@@ -684,15 +684,23 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "pose-adjust": "pose-adjust",
         "air-recon": "air-recon",
         "lens-recon": "lens-recon",
-        "search-and-shoot": "search-and-shoot",
-        "recon-strike": "recon-strike",
-        "30mm-gun-launch": "30mm-gun-launch",
-        "40mm-gun-launch": "30mm-gun-launch",
-        "at-missile-launch": "at-missile-launch",
-        "gun-shot": "gun-shot",
-        "7.62mm-gun-shot": "7.62mm-gun-shot",
-        "rocket-launch": "rocket-launch",
-        "loitering-munition-launch": "loitering-munition-launch",
+        # 旧命名别名（装备行动序列知识-0912 MIGRATION）：shoot/launch 统一为 strike，
+        # 旧 key 仅作为读取别名归一到新规范名
+        "search-and-shoot": "recon-and-strike",
+        "recon-strike": "recon-and-strike",
+        "recon-and-strike": "recon-and-strike",
+        "30mm-gun-launch": "30mm-gun-strike",
+        "40mm-gun-launch": "30mm-gun-strike",
+        "30mm-gun-strike": "30mm-gun-strike",
+        "at-missile-launch": "at-missile-strike",
+        "at-missile-strike": "at-missile-strike",
+        "gun-shot": "machine-gun-strike",
+        "7.62mm-gun-shot": "machine-gun-strike",
+        "machine-gun-strike": "machine-gun-strike",
+        "rocket-launch": "rocket-strike",
+        "rocket-strike": "rocket-strike",
+        "loitering-munition-launch": "loitering-munition-strike",
+        "loitering-munition-strike": "loitering-munition-strike",
         "laser-illumination": "laser-illumination",
         "sound-expel": "sound-expel",
         "acoustic-deterrence": "sound-expel",
@@ -700,8 +708,9 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "light-deterrence": "light-expel",
         "em-recon": "em-recon",
         "electronic-recon": "em-recon",
-        "em-assault": "em-assault",
-        "electronic-assault": "em-assault",
+        "em-assault": "recon-and-interfere",
+        "electronic-assault": "recon-and-interfere",
+        "recon-and-interfere": "recon-and-interfere",
         "em-interference": "em-interference",
         "electronic-jamming": "em-interference",
         "payload-silent": "payload-silent",
@@ -716,28 +725,28 @@ def _infer_action_type_from_action_id(action_id: str) -> str:
         "ch-pose": "pose-adjust",
         # 火力车
         "fs-lens": "lens-recon",
-        "fs-recon-strike": "search-and-shoot",
-        "fs-gun": "7.62mm-gun-shot",
-        "fs-rocket": "rocket-launch",
-        "fs-loiter": "loitering-munition-launch",
+        "fs-recon-strike": "recon-and-strike",
+        "fs-gun": "machine-gun-strike",
+        "fs-rocket": "rocket-strike",
+        "fs-loiter": "loitering-munition-strike",
         # 侦打车
         "rs-lens": "lens-recon",
-        "rs-recon-strike": "search-and-shoot",
-        "rs-30mm": "30mm-gun-launch",
-        "rs-40mm": "30mm-gun-launch",
-        "rs-at": "at-missile-launch",
-        "rs-gun": "7.62mm-gun-shot",
+        "rs-recon-strike": "recon-and-strike",
+        "rs-30mm": "30mm-gun-strike",
+        "rs-40mm": "30mm-gun-strike",
+        "rs-at": "at-missile-strike",
+        "rs-gun": "machine-gun-strike",
         "rs-laser": "laser-illumination",
         # 巡逻车
         "pt-lens": "lens-recon",
-        "pt-recon-strike": "search-and-shoot",
-        "pt-gun": "7.62mm-gun-shot",
+        "pt-recon-strike": "recon-and-strike",
+        "pt-gun": "machine-gun-strike",
         "pt-acoustic": "sound-expel",
         "pt-light": "light-expel",
         # 空地车 / 电磁车
         "ag-air-recon": "air-recon",
         "el-recon": "em-recon",
-        "el-assault": "em-assault",
+        "el-assault": "recon-and-interfere",
         "el-jam": "em-interference",
         "el-silent": "payload-silent",
     }
@@ -787,7 +796,7 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
     # 区分依据：sort=0 为突击，sort=1 为干扰；无 sort 时按 protect 兜底为干扰
     if "frequency" in p:
         if p.get("sort") == 0:
-            return "em-assault"
+            return "recon-and-interfere"
         if p.get("sort") == 1 or "protect" in p:
             return "em-interference"
         return "em-recon"
@@ -812,20 +821,20 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
                 # 但可通过 ammo_type 区分：30炮 ammo_type=2，机枪 ammo_type=1
                 ammo_type = first.get("ammo_type")
                 if ammo_type == 2:
-                    return "30mm-gun-launch"
+                    return "30mm-gun-strike"
                 if ammo_type == 1:
-                    return "7.62mm-gun-shot"
+                    return "machine-gun-strike"
                 # 无 ammo_type 时无法精确区分，保留空字符串让前端兜底
                 return ""
             # 红箭13导弹：通常有 tart/attr 但 ammo_type 不同
             if "ammo_type" in first:
-                return "at-missile-launch"
+                return "at-missile-strike"
             # 火箭弹：通常 points 里有 r 字段
             if "r" in first or p.get("type") == 2:
-                return "rocket-launch"
+                return "rocket-strike"
             # 巡飞弹：通常有 loiter 相关字段
             if "loiter" in p or p.get("type") == 3:
-                return "loitering-munition-launch"
+                return "loitering-munition-strike"
 
     # 光电侦察：area + direct
     if "area" in p and "direct" in p:
@@ -833,7 +842,7 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
 
     # 侦察打击：area 但没有 direct（与 lens-recon 区分）
     if "area" in p:
-        return "search-and-shoot"
+        return "recon-and-strike"
 
     # 编队机动：points + formation_mode，或路径点带 offsetX/offsetY
     if "points" in p and "formation_mode" in p:
@@ -891,20 +900,20 @@ def _infer_action_type_from_name(name: str) -> str:
         "姿态调整": "pose-adjust",
         "空中侦察": "air-recon",
         "光电侦察": "lens-recon",
-        "侦察打击": "search-and-shoot",
-        "巡逻车侦察打击": "search-and-shoot",
-        "30炮打击": "30mm-gun-launch",
-        "40炮打击": "30mm-gun-launch",
-        "红箭13导弹打击": "at-missile-launch",
-        "机枪打击": "7.62mm-gun-shot",
-        "火箭弹打击": "rocket-launch",
-        "巡飞弹打击": "loitering-munition-launch",
+        "侦察打击": "recon-and-strike",
+        "巡逻车侦察打击": "recon-and-strike",
+        "30炮打击": "30mm-gun-strike",
+        "40炮打击": "30mm-gun-strike",
+        "红箭13导弹打击": "at-missile-strike",
+        "机枪打击": "machine-gun-strike",
+        "火箭弹打击": "rocket-strike",
+        "巡飞弹打击": "loitering-munition-strike",
         "激光照射": "laser-illumination",
         "强声拒止": "sound-expel",
         "强光拒止": "light-expel",
         "电磁侦察": "em-recon",
-        "电磁突击": "em-assault",
-        "侦察干扰": "em-assault",
+        "电磁突击": "recon-and-interfere",
+        "侦察干扰": "recon-and-interfere",
         "电磁干扰": "em-interference",
         "载荷静默": "payload-silent",
     }
@@ -927,20 +936,26 @@ def _infer_action_type_from_name(name: str) -> str:
         "poseadjust": "pose-adjust",
         "airrecon": "air-recon",
         "lensrecon": "lens-recon",
-        "searchandshoot": "search-and-shoot",
-        "reconstrike": "search-and-shoot",
-        "30mmgunlaunch": "30mm-gun-launch",
-        "30mmgun": "30mm-gun-launch",
-        "40mmgunlaunch": "30mm-gun-launch",
-        "40mmgun": "30mm-gun-launch",
-        "atmissilelaunch": "at-missile-launch",
-        "atmissile": "at-missile-launch",
-        "gunshot": "7.62mm-gun-shot",
-        "762mmgunshot": "7.62mm-gun-shot",
-        "762mmgun": "7.62mm-gun-shot",
-        "rocketlaunch": "rocket-launch",
-        "loiteringmunitionlaunch": "loitering-munition-launch",
-        "loiteringmunition": "loitering-munition-launch",
+        "searchandshoot": "recon-and-strike",
+        "reconstrike": "recon-and-strike",
+        "reconandstrike": "recon-and-strike",
+        "30mmgunlaunch": "30mm-gun-strike",
+        "30mmgunstrike": "30mm-gun-strike",
+        "30mmgun": "30mm-gun-strike",
+        "40mmgunlaunch": "30mm-gun-strike",
+        "40mmgun": "30mm-gun-strike",
+        "atmissilelaunch": "at-missile-strike",
+        "atmissilestrike": "at-missile-strike",
+        "atmissile": "at-missile-strike",
+        "gunshot": "machine-gun-strike",
+        "762mmgunshot": "machine-gun-strike",
+        "762mmgun": "machine-gun-strike",
+        "machinegunstrike": "machine-gun-strike",
+        "rocketlaunch": "rocket-strike",
+        "rocketstrike": "rocket-strike",
+        "loiteringmunitionlaunch": "loitering-munition-strike",
+        "loiteringmunitionstrike": "loitering-munition-strike",
+        "loiteringmunition": "loitering-munition-strike",
         "laserillumination": "laser-illumination",
         "laser": "laser-illumination",
         "soundexpel": "sound-expel",
@@ -949,8 +964,9 @@ def _infer_action_type_from_name(name: str) -> str:
         "lightdeterrence": "light-expel",
         "emrecon": "em-recon",
         "electronicrecon": "em-recon",
-        "emassault": "em-assault",
-        "electronicassault": "em-assault",
+        "emassault": "recon-and-interfere",
+        "electronicassault": "recon-and-interfere",
+        "reconandinterfere": "recon-and-interfere",
         "eminterference": "em-interference",
         "electronicjamming": "em-interference",
         "payloadsilent": "payload-silent",
@@ -968,18 +984,18 @@ def _infer_vehicle_type_from_action_type(action_type: str) -> str:
     if not t:
         return ""
     # 火力车
-    # 注意：lens-recon / search-and-shoot / 7.62mm-gun-shot 为多车型通用载荷，
+    # 注意：lens-recon / recon-and-strike / machine-gun-strike 为多车型通用载荷，
     # 不能用于推断车型，否则会把侦打车/巡逻车误显示为火力车。
-    if t in {"rocket-launch", "loitering-munition-launch", "gun-shot"}:
+    if t in {"rocket-strike", "loitering-munition-strike", "gun-shot"}:
         return "Fire-Support-UGV"
     # 侦打车
-    if t in {"30mm-gun-launch", "at-missile-launch"}:
+    if t in {"30mm-gun-strike", "at-missile-strike"}:
         return "Recon-Strike-UGV"
     # 巡逻车
     if t in {"sound-expel", "acoustic-deterrence", "light-expel", "light-deterrence"}:
         return "Patrol-UGV"
     # 电磁车
-    if t in {"em-recon", "electronic-recon", "em-assault", "electronic-assault",
+    if t in {"em-recon", "electronic-recon", "recon-and-interfere",
              "em-interference", "electronic-jamming", "payload-silent"}:
         return "Electronic-UGV"
     # 空地车
@@ -1591,10 +1607,15 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "fire_support":
         return {
             "lens-recon": 21,
+            "recon-and-strike": 22,
+            # 旧命名别名（0912 MIGRATION 前）
             "search-and-shoot": 22,
             "recon-strike": 22,
+            "rocket-strike": 23,
             "rocket-launch": 23,
+            "loitering-munition-strike": 24,
             "loitering-munition-launch": 24,
+            "machine-gun-strike": 25,
             "7.62mm-gun-shot": 25,
             "gun-shot": 25,
         }.get(t)
@@ -1603,11 +1624,16 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "recon_strike":
         return {
             "lens-recon": 31,
+            "recon-and-strike": 32,
+            # 旧命名别名（0912 MIGRATION 前）
             "search-and-shoot": 32,
             "recon-strike": 32,
+            "30mm-gun-strike": 33,
             "30mm-gun-launch": 33,
             "40mm-gun-launch": 33,
+            "at-missile-strike": 34,
             "at-missile-launch": 34,
+            "machine-gun-strike": 35,
             "7.62mm-gun-shot": 35,
             "gun-shot": 35,
         }.get(t)
@@ -1616,8 +1642,11 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
     if vt == "patrol":
         return {
             "lens-recon": 51,
+            "recon-and-strike": 52,
+            # 旧命名别名（0912 MIGRATION 前）
             "search-and-shoot": 52,
             "recon-strike": 52,
+            "machine-gun-strike": 53,
             "7.62mm-gun-shot": 53,
             "gun-shot": 53,
             "sound-expel": 54,
@@ -1632,6 +1661,8 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
         return {
             "em-recon": 41,
             "electronic-recon": 41,
+            "recon-and-interfere": 42,
+            # 旧命名别名（0912 MIGRATION 前）
             "em-assault": 42,
             "electronic-assault": 42,
             "em-interference": 43,
@@ -2059,7 +2090,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
         }
 
     # sid = 25/35/53: 机枪打击（简化字段：只保留 time/sort/num/points 中的 lon/lat/alt/tart）
-    if sid in (25, 35, 53) and action_type in ("gun-shot", "7.62mm-gun-shot"):
+    if sid in (25, 35, 53) and action_type in ("machine-gun-strike", "gun-shot", "7.62mm-gun-shot"):
         return {
             "sid": sid,
             "time": param.get("time", 60),
@@ -2780,18 +2811,18 @@ VEHICLE_TYPE_DISPLAY_NAMES = {
 # 底盘类元任务（Auto-Move/Follow-Move/Silent-Guard 等）对所有车型通用，不在这里维护。
 VEHICLE_ACTION_TYPES = {
     "Fire-Support-UGV": [
-        "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
-        "Rocket-Launch", "Loitering-Munition-Launch",
+        "Lens-Recon", "Recon-And-Strike", "Machine-Gun-Strike",
+        "Rocket-Strike", "Loitering-Munition-Strike",
     ],
     "Recon-Strike-UGV": [
-        "Lens-Recon", "Search-And-Shoot", "30mm-Gun-Launch",
-        "AT-Missile-Launch", "7.62mm-Gun-Shot",
+        "Lens-Recon", "Recon-And-Strike", "30mm-Gun-Strike",
+        "AT-Missile-Strike", "Machine-Gun-Strike",
     ],
     "Patrol-UGV": [
-        "Lens-Recon", "Search-And-Shoot", "7.62mm-Gun-Shot",
+        "Lens-Recon", "Recon-And-Strike", "Machine-Gun-Strike",
         "Sound-Expel", "Light-Expel",
     ],
-    "Electronic-UGV": ["EM-Recon", "EM-Assault", "EM-Interference", "Payload-Silent"],
+    "Electronic-UGV": ["EM-Recon", "Recon-And-Interfere", "EM-Interference", "Payload-Silent"],
     "Air-Ground-UAV": ["Air-Recon"],
     # 远程操控车：仅自主机动 + 编队机动（装备行动序列知识 第 7 节）
     "Remote-Control-Car": ["Auto-Move", "Formation-Move"],
