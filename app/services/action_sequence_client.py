@@ -765,12 +765,18 @@ def _infer_action_type_from_param(param: Optional[Dict[str, Any]]) -> str:
     if any(k in p for k in ("ene", "freq", "meat")):
         return "laser-illumination"
 
-    # 空中侦察：空地车特有字段（points 且点内含 camera/speed/gimpitch 等飞行字段）
-    air_points = p.get("points") or []
-    if isinstance(air_points, list) and air_points:
-        first = air_points[0]
-        if isinstance(first, dict) and any(k in first for k in ("camera", "speed", "gimpitch", "gimyaw", "playaw", "zoom", "loiter")):
-            return "air-recon"
+    # 空中侦察：空地车特有字段（service.points1/2/3 数组或旧格式顶层 points，
+    # 点内含 camera/speed/gimpitch 等飞行字段）
+    svc = p.get("service") if isinstance(p.get("service"), dict) else {}
+    candidates = []
+    for pt_list in [p.get("points")] + [svc.get(f"points{i}") for i in (1, 2, 3)]:
+        if isinstance(pt_list, list) and pt_list:
+            candidates.append(pt_list[0])
+    if any(
+        isinstance(pt, dict) and any(k in pt for k in ("camera", "speed", "gimpitch", "gimyaw", "playaw", "zoom", "loiter"))
+        for pt in candidates
+    ):
+        return "air-recon"
 
     # 强声/强光拒止：有 area 且 attr 字段
     if "area" in p and "attr" in p:
@@ -1884,8 +1890,16 @@ def _build_strike_points(points):
     return result
 
 
+def _air_recon_alt_to_int(value: Any) -> int:
+    """空中侦察航点高程：协议系数 10（协调卡-空地），非法值返回 0。"""
+    try:
+        return int(float(value or 0) * 10)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_air_recon_points(points):
-    """空中侦察航路点：lon/lat/alt 以 10^6 缩放后的整数形式下发，保留飞行/相机扩展字段。"""
+    """空中侦察航路点：lon/lat 以 10^6、alt 以 10 缩放后的整数形式下发，保留飞行/相机扩展字段。"""
     result = []
     for pt in points or []:
         if not isinstance(pt, dict):
@@ -1896,7 +1910,7 @@ def _build_air_recon_points(points):
         result.append({
             "lon": _coord_to_int(lon),
             "lat": _coord_to_int(lat),
-            "alt": _coord_to_int(alt),
+            "alt": _air_recon_alt_to_int(alt),
             "type": pt.get("type", 0),
             "speed": int(float(pt.get("speed", 0))),
             "camera": pt.get("camera", 1),
@@ -2115,15 +2129,18 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "area": _build_area_points(param.get("area")),
         }
 
-    # sid = 71: 空中侦察
+    # sid = 71: 空中侦察（service.points1/2/3 为三架无人机各自的航迹点数组，见 装备行动序列知识-0911 §6.2）
     if sid == 71:
-        return {
+        svc = param.get("service") if isinstance(param.get("service"), dict) else {}
+        service = {
             "sid": 71,
             "type": param.get("type", 2),
             "mode": param.get("mode", 1),
             "time": param.get("time", 120),
-            "points": _build_air_recon_points(param.get("points")),
         }
+        for i in (1, 2, 3):
+            service[f"points{i}"] = _build_air_recon_points(svc.get(f"points{i}"))
+        return service
 
     # sid = 41: 电磁侦察
     if sid == 41:
