@@ -9,7 +9,12 @@ from contextlib import asynccontextmanager
 import time
 import json
 
+# 日志时间戳统一北京时间（包装 stdout/stderr + uvicorn formatter），须先于业务模块
+from app.log_setup import install as _install_log_timestamps
+_install_log_timestamps()
+
 from app.routers import kill_chain, planning, action_sequence, ssl, zenoh as zenoh_router
+from app.routers import debug as debug_router
 from app.services.task_pool import task_pool
 from app.services.sse_manager import sse_manager
 from app.services import zenoh_client
@@ -166,6 +171,7 @@ app.include_router(planning.router, prefix="/api/v1", tags=["规划事件流"])
 app.include_router(action_sequence.router, prefix="/api/v1", tags=["行动序列"])
 app.include_router(ssl.router, prefix="/api/v1", tags=["SSL地图数据"])
 app.include_router(zenoh_router.router, prefix="/api/v1", tags=["Zenoh"])
+app.include_router(debug_router.router, prefix="/api/v1", tags=["调试"])
 
 
 @app.get("/health")

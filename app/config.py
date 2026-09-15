@@ -2,8 +2,17 @@
 服务地址集中配置
 
 所有外部服务地址统一定义在此文件中，便于查找和修改。
-修改后需重启后端服务生效。
+模块常量即默认值；现场调试可通过 /api/v1/debug/config 接口写入
+runtime_config.json（backend-dev 根目录，已 gitignore）覆盖，getter 每次
+调用都读覆盖值，HTTP 地址类配置无需重启即可生效；Zenoh 路由器地址例外
+（生效配置在 zenoh_py/zenoh.json5，改后需重启后端）。
 """
+
+import copy
+import ipaddress
+import json
+import os
+from typing import Any, Dict, List
 
 # ========== 数据服务器 ==========
 # 协同席数据服务器（PLAN / KILL_CHAIN / ACTION 等）
@@ -19,14 +28,13 @@ RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"
 # 上游车辆管理服务（/vehicle/info/all 车辆实时信息、/formation/mission/send 编队任务下发）
 VEHICLE_INFO_ALL_BASE_URL = "http://25.11.1.3:28410"
 
-# 编队机动任务下发接口（POST，body 为 {"task": ...}，替代原 zenoh send_formation_mission）
-FORMATION_MISSION_SEND_URL = f"{VEHICLE_INFO_ALL_BASE_URL}/formation/mission/send"
-
 # 车辆控制服务（/user/current、/health 等）
 VEHICLE_CONTROL_BASE_URL = "http://25.11.1.178:28009"
 
 # ========== Zenoh 消息服务 ==========
-# Zenoh 路由器地址（TCP）
+# Zenoh 路由器地址（TCP）。
+# 注意：本常量无调用方（死配置），实际生效地址在 zenoh_py/zenoh.json5 的
+# connect.endpoints，由 zenoh_py/zenoh_service.py 在启动时加载；改动时两处同步改。
 ZENOH_ROUTER_URL = "tcp/25.11.1.3:7447"
 
 # ========== 任务监控 ==========
@@ -64,31 +72,147 @@ SEAT_TARGET_IPS = {
 }
 
 
+# ========== 运行时配置覆盖 ==========
+# 覆盖表持久化文件（backend-dev 根目录；现场二进制部署时放二进制同级可写目录）。
+RUNTIME_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "runtime_config.json",
+)
+
+# 可覆盖键：key -> (中文名, 校验类型)
+_OVERRIDABLE_KEYS: Dict[str, tuple] = {
+    "DATA_SERVER_BASE_URL": ("协同席数据服务器", "url"),
+    "OPERATOR_DATA_SERVER_BASE_URL": ("操控席数据服务器", "url"),
+    "RESOURCE_POOL_BASE_URL": ("资源池服务", "url"),
+    "VEHICLE_INFO_ALL_BASE_URL": ("车辆管理服务（/vehicle/info/all、编队任务下发）", "url"),
+    "VEHICLE_CONTROL_BASE_URL": ("车辆控制服务", "url"),
+    "SEAT_TARGET_IPS": ("席位下发目标 IP 映射", "seat_ips"),
+}
+
+
+def _load_runtime_overrides() -> Dict[str, Any]:
+    """启动时从 runtime_config.json 读取覆盖表；文件不存在或损坏时返回空表"""
+    try:
+        with open(RUNTIME_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if k in _OVERRIDABLE_KEYS}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+_RUNTIME_OVERRIDES: Dict[str, Any] = _load_runtime_overrides()
+
+
+def _effective(key: str) -> Any:
+    """覆盖值优先，否则取同名模块常量默认值"""
+    if key in _RUNTIME_OVERRIDES:
+        return _RUNTIME_OVERRIDES[key]
+    return globals()[key]
+
+
+def get_runtime_overrides() -> Dict[str, Any]:
+    """返回当前覆盖表（内存与 runtime_config.json 一致）"""
+    return copy.deepcopy(_RUNTIME_OVERRIDES)
+
+
+def _validate_override(key: str, value: Any) -> None:
+    meta = _OVERRIDABLE_KEYS.get(key)
+    if meta is None:
+        raise ValueError(f"{key}: 不支持覆盖的配置项（可覆盖: {', '.join(_OVERRIDABLE_KEYS)}）")
+    kind = meta[1]
+    if kind == "url":
+        if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+            raise ValueError(f"{key}: 必须是以 http:// 或 https:// 开头的 URL")
+    elif kind == "seat_ips":
+        if not isinstance(value, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+        ):
+            raise ValueError(f"{key}: 必须是 dict[str, str]（席位 ID → 裸 IP）")
+        for k, v in value.items():
+            try:
+                ipaddress.ip_address(v)
+            except ValueError:
+                raise ValueError(f"{key}[{k}]: '{v}' 不是合法的裸 IP（不允许带端口/协议）")
+
+
+def update_runtime_overrides(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """校验并合并覆盖项，写回 runtime_config.json 并更新内存，返回生效后的覆盖表。
+
+    值为空字符串表示删除该键（恢复默认值），不做校验。
+    校验失败抛 ValueError（信息指明字段），此时不落盘、不改内存。
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("patch 必须是 dict")
+    deletes = [k for k, v in patch.items() if v == ""]
+    for key, value in patch.items():
+        if value == "":
+            if key not in _OVERRIDABLE_KEYS:
+                raise ValueError(f"{key}: 不支持覆盖的配置项（可覆盖: {', '.join(_OVERRIDABLE_KEYS)}）")
+            continue
+        _validate_override(key, value)
+    for key in deletes:
+        _RUNTIME_OVERRIDES.pop(key, None)
+    for key, value in patch.items():
+        if value != "":
+            _RUNTIME_OVERRIDES[key] = copy.deepcopy(value)
+    with open(RUNTIME_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(_RUNTIME_OVERRIDES, f, ensure_ascii=False, indent=2)
+    return copy.deepcopy(_RUNTIME_OVERRIDES)
+
+
+def get_effective_config() -> List[Dict[str, Any]]:
+    """返回 [{key, label, default, effective, overridden}]，供调试接口展示"""
+    items = []
+    for key, (label, _kind) in _OVERRIDABLE_KEYS.items():
+        default = globals()[key]
+        overridden = key in _RUNTIME_OVERRIDES
+        items.append({
+            "key": key,
+            "label": label,
+            "default": copy.deepcopy(default),
+            "effective": copy.deepcopy(_RUNTIME_OVERRIDES[key]) if overridden else copy.deepcopy(default),
+            "overridden": overridden,
+        })
+    return items
+
+
 def get_data_server_url() -> str:
     """获取协同席数据服务器地址"""
-    return DATA_SERVER_BASE_URL
+    return _effective("DATA_SERVER_BASE_URL")
 
 
 def get_operator_data_server_url() -> str:
     """获取操控席数据服务器地址"""
-    return OPERATOR_DATA_SERVER_BASE_URL
+    return _effective("OPERATOR_DATA_SERVER_BASE_URL")
 
 
 def get_resource_pool_url() -> str:
     """获取资源池服务地址"""
-    return RESOURCE_POOL_BASE_URL
+    return _effective("RESOURCE_POOL_BASE_URL")
 
 
 def get_vehicle_info_all_url() -> str:
     """获取上游车辆管理服务地址"""
-    return VEHICLE_INFO_ALL_BASE_URL
+    return _effective("VEHICLE_INFO_ALL_BASE_URL")
 
 
 def get_vehicle_control_url() -> str:
     """获取车辆控制服务地址"""
-    return VEHICLE_CONTROL_BASE_URL
+    return _effective("VEHICLE_CONTROL_BASE_URL")
+
+
+def get_formation_mission_send_url() -> str:
+    """编队机动任务下发接口（POST，body 为 {"task": ...}，替代原 zenoh send_formation_mission）"""
+    return f"{get_vehicle_info_all_url()}/formation/mission/send"
+
+
+def get_seat_target_ips() -> Dict[str, str]:
+    """获取席位 ID → 目标数据服务器 IP 映射"""
+    return dict(_effective("SEAT_TARGET_IPS"))
 
 
 def get_zenoh_router_url() -> str:
-    """获取 Zenoh 路由器地址"""
+    """获取 Zenoh 路由器地址（死配置，实际生效值见 zenoh_py/zenoh.json5）"""
     return ZENOH_ROUTER_URL

@@ -22,9 +22,9 @@ DS_HTTP_DEBUG = True
 # ========== 配置 ==========
 # 服务地址统一定义在 app/config.py 中，便于查找和修改
 from app.config import (
-    DATA_SERVER_BASE_URL,
-    OPERATOR_DATA_SERVER_BASE_URL,
-    RESOURCE_POOL_BASE_URL,
+    get_data_server_url,
+    get_operator_data_server_url,
+    get_resource_pool_url,
 )
 TIMEOUT_SECONDS = (1, 2)  # (connect timeout, read timeout)；连接 1s、读取 2s，断连时快速失败
 MOCK_MODE = False  # False 时数据服务器不可达返回 None/错误，不返回 fake data
@@ -58,7 +58,7 @@ def validate_resource_state(resource: Dict[str, Any]) -> tuple[bool, str]:
 def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
-    url = f"{DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_data_server_url()}{path}"
     debug = not silent or DS_HTTP_DEBUG
     try:
         if debug:
@@ -77,7 +77,7 @@ def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) ->
 def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False, timeout: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
-    url = f"{DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_data_server_url()}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:
@@ -97,7 +97,7 @@ def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False
 def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
-    url = f"{DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_data_server_url()}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:
@@ -123,7 +123,7 @@ def forward_resources_to_targets(
     """调用协同席数据服务器的 /ingestion/forward 接口，将资源下发到指定目标席位。"""
     if not HAS_REQUESTS:
         return None
-    url = f"{DATA_SERVER_BASE_URL}/api/v1/task_pool/ingestion/forward"
+    url = f"{get_data_server_url()}/api/v1/task_pool/ingestion/forward"
     body = {
         "target_ips": target_ips,
         "resource_ids": resource_ids,
@@ -287,7 +287,7 @@ def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = 
     """向操控席数据服务器发送 GET 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_operator_data_server_url()}{path}"
     debug = not silent or DS_HTTP_DEBUG
     try:
         if debug:
@@ -307,7 +307,7 @@ def _http_get_resource_pool(path: str, params: Optional[Dict] = None, silent: bo
     """向资源池服务（resource_pool_refactor）发送 GET 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{RESOURCE_POOL_BASE_URL}{path}"
+    url = f"{get_resource_pool_url()}{path}"
     try:
         if not silent:
             print(f"[RP-OUT] GET  {url} | params={params}")
@@ -326,7 +326,7 @@ def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: boo
     """向操控席数据服务器发送 POST 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_operator_data_server_url()}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:
@@ -347,7 +347,7 @@ def _http_patch_operator(path: str, json_body: Optional[Dict] = None, silent: bo
     """向操控席数据服务器发送 PATCH 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{OPERATOR_DATA_SERVER_BASE_URL}{path}"
+    url = f"{get_operator_data_server_url()}{path}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:

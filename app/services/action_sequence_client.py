@@ -24,7 +24,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-from app.config import FORMATION_MISSION_SEND_URL
+from app.config import get_formation_mission_send_url, get_seat_target_ips
 from app.services.data_server_client import (
     _http_get, _http_post, _http_patch,
     _http_get_operator, _http_post_operator, _http_patch_operator,
@@ -2751,9 +2751,9 @@ def build_formation_mission_body(plan: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
     """协同席下发的附加逻辑：plan 含编队机动元任务时，POST 到编队任务下发接口。
 
-    POST FORMATION_MISSION_SEND_URL（车辆管理/编队服务 25.11.1.3:28410
-    /formation/mission/send），body 为 {"task": ...}，vehicles 数组头车排第一。
-    该附加发送失败不影响原下发结果。
+    POST {VEHICLE_INFO_ALL}/formation/mission/send（车辆管理/编队服务 25.11.1.3:28410，
+    地址见 config.get_formation_mission_send_url()），body 为 {"task": ...}，
+    vehicles 数组头车排第一。该附加发送失败不影响原下发结果。
     """
     plan = get_plan_detail(plan_id)
     if not plan:
@@ -2761,11 +2761,12 @@ def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
     body, vids, leader_vid = build_formation_mission_body(plan)
     if not vids:
         return {"sent": False, "reason": "no formation-move action"}
+    send_url = get_formation_mission_send_url()
     tid = body["task"]["tid"]
     result: Dict[str, Any] = {
         "sent": True,
         "ok": False,
-        "url": FORMATION_MISSION_SEND_URL,
+        "url": send_url,
         "leader_vid": leader_vid,
         "tid": tid,
         "vehicle_count": len(vids),
@@ -2776,21 +2777,21 @@ def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
         return result
     try:
         resp = requests.post(
-            FORMATION_MISSION_SEND_URL,
+            send_url,
             json=body,
             timeout=10,
             proxies={"http": None, "https": None},
         )
         result["ok"] = resp.ok
         result["status_code"] = resp.status_code
-        print(f"[FORMATION-HTTP] POST {FORMATION_MISSION_SEND_URL} | status={resp.status_code} | tid={tid} | leader={leader_vid} | vehicles={vids}")
+        print(f"[FORMATION-HTTP] POST {send_url} | status={resp.status_code} | tid={tid} | leader={leader_vid} | vehicles={vids}")
         try:
             result["response"] = resp.json()
         except Exception:
             result["response_text"] = resp.text[:500]
     except Exception as e:
         result["error"] = str(e)
-        print(f"[FORMATION-HTTP] POST {FORMATION_MISSION_SEND_URL} failed | tid={tid} | error={e}")
+        print(f"[FORMATION-HTTP] POST {send_url} failed | tid={tid} | error={e}")
     return result
 
 
@@ -3601,14 +3602,13 @@ def delete_vehicle(plan_id: str, vid: str) -> Dict[str, Any]:
 def dispatch_plan_forward(plan_id: str, target_ips: List[str], timeout_seconds: int = 30) -> Dict[str, Any]:
     """协同席 — 将指定 plan 通过数据服务器 /ingestion/forward 下发到目标席位。
 
-    席位 ID 先经 config.SEAT_TARGET_IPS 映射为目标数据服务器 IP（调试期间全部
+    席位 ID 先经 config.get_seat_target_ips() 映射为目标数据服务器 IP（调试期间全部
     映射到操控席 25.11.1.56）；已是裸 IP 的值原样透传。
     返回包含数据服务器原始响应的 dict。
     """
-    from app.config import SEAT_TARGET_IPS
-
     rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
-    resolved = [SEAT_TARGET_IPS.get(t, t) for t in target_ips]
+    seat_target_ips = get_seat_target_ips()
+    resolved = [seat_target_ips.get(t, t) for t in target_ips]
     result = forward_resources_to_targets(
         target_ips=resolved,
         resource_ids=[rid],

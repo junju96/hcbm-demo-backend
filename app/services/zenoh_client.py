@@ -6,7 +6,7 @@ Zenoh 客户端封装层
 import json
 import threading
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from zenoh_py.zenoh_service import (
@@ -24,10 +24,13 @@ from zenoh_py.zenoh_service import (
 # ---------- 日志文件 ----------
 ZENOH_LOG_FILE = os.environ.get("ZENOH_LOG_FILE", "/tmp/zenoh_payload.log")
 
+# 日志时间统一按北京时间（UTC+8），与设备本地时区无关（现场席位机时区不可控）
+_BEIJING_TZ = timezone(timedelta(hours=8), name="UTC+8")
+
 
 def _zenoh_log(level: str, message: str) -> None:
     """写 Zenoh 接口日志到独立文件，并打印到 stdout。"""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    now = datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     line = f"[{now}] [{level}] {message}"
     print(line)
     try:

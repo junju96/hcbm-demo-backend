@@ -146,7 +146,7 @@ class TestPublishFormationMissionIfAny(unittest.TestCase):
         self.assertEqual(result["vehicle_count"], 2)
         # 只 POST 一次到编队任务下发接口，body 直接是 {"task": ...}
         mock_post.assert_called_once()
-        self.assertEqual(mock_post.call_args.args[0], asc.FORMATION_MISSION_SEND_URL)
+        self.assertEqual(mock_post.call_args.args[0], asc.get_formation_mission_send_url())
         body = mock_post.call_args.kwargs["json"]
         vehicles = body["task"]["vehicles"]
         self.assertEqual(vehicles[0]["vid"], _VMFS["ZD01"])

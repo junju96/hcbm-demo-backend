@@ -24,7 +24,7 @@ except ImportError:
     HAS_REQUESTS = False
 
 # 服务地址统一定义在 app/config.py 中，便于查找和修改
-from app.config import VEHICLE_INFO_ALL_BASE_URL
+from app.config import get_vehicle_info_all_url
 VEHICLE_INFO_ALL_PATH = "/vehicle/info/all"
 DEFAULT_REFRESH_INTERVAL_SECONDS = 30
 
@@ -42,10 +42,11 @@ def _normalize_vehicle_id(vehicle_id: str) -> str:
 
 
 def query_vehicle_info_all(
-    base_url: str = VEHICLE_INFO_ALL_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: int = 5,
 ) -> Optional[List[Dict[str, Any]]]:
     """向上游车辆管理服务查询所有车辆信息，返回原始数组"""
+    base_url = base_url or get_vehicle_info_all_url()
     if not HAS_REQUESTS:
         print("[VC-DEBUG] requests not available")
         return None
@@ -70,10 +71,11 @@ def query_vehicle_info_all(
 
 
 def refresh_vehicle_info(
-    base_url: str = VEHICLE_INFO_ALL_BASE_URL,
+    base_url: Optional[str] = None,
     timeout: int = 5,
 ) -> List[Dict[str, Any]]:
     """刷新车辆信息缓存，返回当前连接的车辆列表（vid 已去前缀）"""
+    base_url = base_url or get_vehicle_info_all_url()
     global _VEHICLE_INFO_CACHE, _LAST_REFRESH_AT
     items = query_vehicle_info_all(base_url, timeout)
     new_cache: Dict[str, Dict[str, Any]] = {}
