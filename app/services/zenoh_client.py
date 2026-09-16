@@ -22,7 +22,11 @@ from zenoh_py.zenoh_service import (
 )
 
 # ---------- 日志文件 ----------
-ZENOH_LOG_FILE = os.environ.get("ZENOH_LOG_FILE", "/tmp/zenoh_payload.log")
+# 默认写到 backend-dev/logs/ 下（与 http 主日志同目录），可用环境变量覆盖
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ZENOH_LOG_FILE = os.environ.get(
+    "ZENOH_LOG_FILE", os.path.join(_BACKEND_ROOT, "logs", "zenoh_payload.log")
+)
 
 # 日志时间统一按北京时间（UTC+8），与设备本地时区无关（现场席位机时区不可控）
 _BEIJING_TZ = timezone(timedelta(hours=8), name="UTC+8")

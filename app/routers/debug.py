@@ -163,17 +163,20 @@ def restart_backend():
 
 # ---------- 后端日志导出 ----------
 
-# 主运行日志路径：app_ctl.sh 开发环境为 backend-dev/backend-28600-run.log；
+# 主运行日志路径：app_ctl.sh 开发环境为 backend-dev/logs/backend-28600-run.log；
 # 现场二进制部署可用环境变量 BACKEND_LOG_FILE 指向实际日志文件。
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BACKEND_LOG_FILE = os.environ.get(
-    "BACKEND_LOG_FILE", os.path.join(_BACKEND_ROOT, "backend-28600-run.log")
+    "BACKEND_LOG_FILE", os.path.join(_BACKEND_ROOT, "logs", "backend-28600-run.log")
 )
 
 # 只允许导出这两个已知日志文件，不接受任意路径（防目录穿越）
+# zenoh 日志默认路径与 app/services/zenoh_client.py 的 ZENOH_LOG_FILE 默认值保持一致
 _LOG_SOURCES = {
     "backend": ("backend", lambda: BACKEND_LOG_FILE),
-    "zenoh": ("zenoh-payload", lambda: os.environ.get("ZENOH_LOG_FILE", "/tmp/zenoh_payload.log")),
+    "zenoh": ("zenoh-payload", lambda: os.environ.get(
+        "ZENOH_LOG_FILE", os.path.join(_BACKEND_ROOT, "logs", "zenoh_payload.log")
+    )),
 }
 
 
