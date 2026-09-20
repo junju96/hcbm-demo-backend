@@ -2391,7 +2391,7 @@ def build_mission_data(
                 "vid": [vmf],
                 "vip": [vip],
                 "strategy": strategy,
-                "premise": list(range(1, idx)),  # 前置为前面所有 action
+                "premise": list(range(1, idx)) or [0],  # 前置为前面所有 action；无前置时车端要求 premise 不能空，填 [0]
                 "endwith": -1,
                 "level": 0,
                 "service": service,
