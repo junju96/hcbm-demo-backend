@@ -2580,7 +2580,9 @@ def publish_control_mission(
 
     Args:
         plan_id: 方案 ID
-        task_control: 1=开始, 2=暂停, 3=继续, 4=停止
+        task_control: 控制指令（按 MissionService_前端Zenoh对接.md）
+            1=开始，2=暂停，3=继续，4=停止，5=规划，6=立即执行
+            操控席界面："规划"按钮 -> 5，"开始"按钮 -> 6（2026-09-20 由 1 调整为 6）
         vehicle_vid: 可选，指定车辆 vid；不指定则自动从 plan 中取第一个 vid
 
     Returns:

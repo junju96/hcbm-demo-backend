@@ -613,11 +613,11 @@ async def sync_plan_operator(plan_id: str):
 
 @router.post("/action-sequences/operator/plans/{plan_id}/start", response_model=ApiResponse)
 async def start_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
-    """操控端 — 开始执行 — Zenoh control_mission (task_control=1)"""
+    """操控端 — 开始执行 — Zenoh control_mission (task_control=6，立即执行)"""
     ok, msg = action_runtime.transit(plan_id, "ACTIVE")
     if not ok:
         return ApiResponse(code=400, message=msg, data=None)
-    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=1, vehicle_vid=vehicle_vid)
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=6, vehicle_vid=vehicle_vid)
 
     # Zenoh 控制指令下发成功后，启动任务监控轮询（每 5 秒上报一次绿色接口）
     if zenoh_ok:
@@ -629,6 +629,19 @@ async def start_plan_operator(plan_id: str, vehicle_vid: Optional[str] = Query(N
 
     return ApiResponse(data={
         "plan_id": plan_id, "action": "start", "state": "ACTIVE", "message": msg,
+        "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
+    })
+
+
+@router.post("/action-sequences/operator/plans/{plan_id}/planning", response_model=ApiResponse)
+async def plan_mission_operator(plan_id: str, vehicle_vid: Optional[str] = Query(None)):
+    """操控端 — 规划 — Zenoh control_mission (task_control=5)
+
+    规划指令只向车端发送 control_mission，不改变本地 runtime_state。
+    """
+    zenoh_ok, zenoh_msg = publish_control_mission(plan_id, task_control=5, vehicle_vid=vehicle_vid)
+    return ApiResponse(data={
+        "plan_id": plan_id, "action": "planning", "state": "SCHEDULED", "message": "规划指令已下发",
         "zenoh": {"ok": zenoh_ok, "message": zenoh_msg},
     })
 
