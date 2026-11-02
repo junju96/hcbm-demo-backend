@@ -78,6 +78,7 @@ def _infer_resource_type_from_vid(vid: str) -> str:
 def _build_car_actions_from_plan(
     plan: Dict[str, Any],
     http_post=_http_post,
+    fill_actions: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     将 plan.stages[].team_actions 转换为按车辆(vid)组织的行动序列列表。
@@ -91,12 +92,17 @@ def _build_car_actions_from_plan(
 
     http_post 参数用于指定调用哪个数据服务器：默认 _http_post（协同席数据服务器），
     操控席调用时应传入 _http_post_operator，避免席位数据串用。
+
+    fill_actions=False 时跳过 CAR_ACTIONS/ACTION 补全查询：列表摘要（vehicle_summary）
+    只需要 vid + resource_type，而 DS query 的 filters 不生效（每次返回全池数据，单次
+    ~0.5s），plan 多时每条空 actions 的 plan 都要补 2 次全池查询，会把列表接口拖过
+    前端 8s 超时（2026-10-30：170 条 plan 时列表接口 9.4s，前端显示"暂无方案"）。
     """
     plan_id = plan.get("plan_id", "")
     stages = plan.get("stages", [])
     results: List[Dict[str, Any]] = []
 
-    # 先按 stages.team_actions 收集，同时记录需要补全的 (stage_id, vid)
+    # 先按 stages.team_actions 收集；fill_actions=False 时不记录补全需求
     missing_queries = []
     for stage in stages:
         stage_id = stage.get("stage_id", "")
@@ -133,8 +139,8 @@ def _build_car_actions_from_plan(
                 vid = vehicle.get("vid", "")
                 actions = vehicle.get("actions", [])
                 ca_id = vehicle.get("car_actions_id") or f"ca:{plan_id}:{stage_id}:{vid}"
-                # 如果该 vehicle 的 actions 为空，标记后续从 CAR_ACTIONS 补全
-                if vid and not actions:
+                # 如果该 vehicle 的 actions 为空，标记后续从 CAR_ACTIONS 补全（fill_actions=False 时跳过）
+                if fill_actions and vid and not actions:
                     missing_queries.append((stage_id, stage_seq, stage_title, team_id, vid, ca_id, vehicle.get("action_ids") or []))
                 results.append({
                     "car_actions_id": ca_id,
@@ -529,7 +535,7 @@ def _build_vehicle_summary_brief(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     复用详情接口的同一套车型判定（teams > 在线车辆缓存 > vid 前缀 > action_type），
     供前端按车型过滤，避免对每个 plan 再拉一次详情（N+1）。
     """
-    car_actions = _build_car_actions_from_plan(plan)
+    car_actions = _build_car_actions_from_plan(plan, fill_actions=False)
     full = _to_frontend_plan(plan, car_actions)
     return [
         {"vid": v.get("vid", ""), "resource_type": v.get("resource_type", "")}
