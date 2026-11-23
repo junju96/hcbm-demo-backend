@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """plan 列表接口轻量 vehicle_summary 测试 — 前端按车型过滤不再 N+1 拉详情"""
 import unittest
+from unittest.mock import patch
 
 from app.services import action_sequence_client as asc
 
@@ -45,6 +46,31 @@ class TestVehicleSummaryBrief(unittest.TestCase):
 
     def test_empty_plan_returns_empty(self):
         self.assertEqual(asc._build_vehicle_summary_brief({"plan_id": "p", "stages": []}), [])
+
+
+class TestPlanReplacesField(unittest.TestCase):
+    def _raw_plan(self, replaces_plan_id):
+        plan = _plan_with_teams()
+        plan["replaces_plan_id"] = replaces_plan_id
+        return plan
+
+    def test_coordination_list_carries_replaces_plan_id(self):
+        raw = [self._raw_plan(None), self._raw_plan("plan-old")]
+        with patch.object(asc, "_http_post", return_value=raw):
+            items = asc.query_plans()
+        self.assertEqual(
+            [item["replaces_plan_id"] for item in items],
+            [None, "plan-old"],
+        )
+
+    def test_operator_list_carries_replaces_plan_id_and_defaults_none(self):
+        raw = [self._raw_plan("plan-old"), _plan_with_teams()]
+        with patch.object(asc, "_http_post_operator", return_value=raw):
+            items = asc.query_plans_operator()
+        self.assertEqual(
+            [item["replaces_plan_id"] for item in items],
+            ["plan-old", None],
+        )
 
 
 if __name__ == "__main__":

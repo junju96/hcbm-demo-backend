@@ -525,6 +525,7 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
             "teams_count": len(item.get("teams") or []),
             "stages_count": len(stages),
             "vehicle_summary": _build_vehicle_summary_brief(item),
+            "replaces_plan_id": item.get("replaces_plan_id"),
         })
     return result
 
@@ -1284,6 +1285,54 @@ def _get_cached_plan_for_seat(rid: str, seat: str) -> Optional[Dict[str, Any]]:
     return plan
 
 
+def _sync_projection_param_fields(param: Dict[str, Any]) -> Dict[str, Any]:
+    """把 UI/协调卡字段镜像到 DS 类型化投影字段，保证保存后能读回。
+
+    - area / target.location（lon/lat/alt）→ area_points（longitude/latitude/altitude）
+    - points → targets[0].location（仅单个目标时；多目标拆分语义不明确，保持原样）
+
+    全 0 占位不参与镜像（避免「打开弹窗后保存」用 0 覆盖真实坐标）。
+    """
+    if not isinstance(param, dict):
+        return param
+    result = copy.deepcopy(param)
+
+    area = result.get("area")
+    if not _is_effective_points(area):
+        target = result.get("target")
+        if isinstance(target, dict):
+            area = target.get("location")
+    if _is_effective_points(area):
+        result["area_points"] = [
+            {
+                "longitude": point.get("lon", point.get("longitude", 0)),
+                "latitude": point.get("lat", point.get("latitude", 0)),
+                "altitude": point.get("alt", point.get("altitude", 0)),
+            }
+            for point in area
+            if isinstance(point, dict)
+        ]
+
+    points = result.get("points")
+    targets = result.get("targets")
+    if (
+        _is_effective_points(points)
+        and isinstance(targets, list)
+        and len(targets) == 1
+        and isinstance(targets[0], dict)
+    ):
+        targets[0]["location"] = [
+            {
+                "longitude": point.get("lon", point.get("longitude", 0)),
+                "latitude": point.get("lat", point.get("latitude", 0)),
+                "altitude": point.get("alt", point.get("altitude", 0)),
+            }
+            for point in points
+            if isinstance(point, dict)
+        ]
+    return result
+
+
 def _apply_action_param_update(plan: Dict[str, Any], action_id: str, param: Dict[str, Any]) -> bool:
     """在 plan 的 stages/car_actions/vehicle_summary 中同步更新指定 action 的 param。"""
     updated = False
@@ -1348,6 +1397,7 @@ def _update_action_param_impl(
     if plan is None:
         return False
 
+    param = _sync_projection_param_fields(param)
     updated = _apply_action_param_update(plan, action_id, param)
     if not updated:
         print(f"[AS-DEBUG] action not found: plan_id={plan_id} action_id={action_id} seat={label}")
@@ -1682,6 +1732,7 @@ def _resolve_sid(vehicle_type: str, action_type: str, name: str = "") -> int:
             "air-recon": 71,
             "air_recon": 71,
             "ag_air_recon": 71,
+            "uav-air-recon": 71,
         }.get(t)
 
     # 对无法识别车型的车辆，底盘类元任务已经返回 sid；
@@ -1981,13 +2032,17 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     name = action.get("name", "")
     description = action.get("description", "")
     param = action.get("param") or {}
-    action_type = (action.get("action_type") or "").strip()
+    # 统一 action_type 命名：小写连字符 + 别名归一到 0912 规范名
+    # （DS 侧空中侦察存的是 UAV-Air-Recon，不归一会解析不到 sid=71）
+    action_type = (action.get("action_type") or "").strip().lower().replace("_", "-")
+    if action_type == "uav-air-recon":
+        action_type = "air-recon"
 
     sid = _resolve_sid(vehicle_type, action_type, name)
 
     # sid = 1: 自主机动 / 循迹机动
     if sid == 1:
-        points = _build_path_points(param.get("points"))
+        points = _build_path_points(_resolve_move_points(param))
         if len(points) < 2:
             # fallback：兼容旧 waypoints 字段或占位
             wps = param.get("waypoints")
@@ -2001,7 +2056,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
         return {
             "sid": 1,
             "points": points,
-            "limited_speed": param.get("limited_speed", 20),
+            "limited_speed": param.get("limited_speed", param.get("speed", 20)),
             "safe_mode": param.get("safe_mode", 0),
             "loop_mode": param.get("loop_mode", 0),
         }
@@ -2063,7 +2118,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "type": param.get("type", 2),
             "mode": param.get("mode", 3),
             "time": param.get("time", 120),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
         }
         direct = _build_direct(param.get("direct"))
         if direct and param.get("mode") == 4:
@@ -2075,7 +2130,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
         return {
             "sid": sid,
             "time": param.get("time", 180),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
         }
 
     # sid = 52: 巡逻车侦察打击
@@ -2092,27 +2147,29 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "sug": param.get("sug", 0),
             "ammo": param.get("ammo", 0),
             "strategy": param.get("strategy", 0),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
         }
 
     # sid = 25/35/53: 机枪打击（简化字段：只保留 time/sort/num/points 中的 lon/lat/alt/tart）
     if sid in (25, 35, 53) and action_type in ("machine-gun-strike", "gun-shot", "7.62mm-gun-shot"):
+        points = _resolve_strike_points(param)
         return {
             "sid": sid,
-            "time": param.get("time", 60),
+            "time": _resolve_action_time(param, 60),
             "sort": param.get("sort", 0),
-            "num": param.get("num", len(param.get("points", [])) or 1),
-            "points": _build_gun_shot_points(param.get("points")),
+            "num": _resolve_strike_num(param, points),
+            "points": _build_gun_shot_points(points),
         }
 
     # sid = 23/24/25/33/35/53: 各类打击（公共字段）
     if sid in (23, 24, 25, 33, 35, 53):
+        points = _resolve_strike_points(param)
         service = {
             "sid": sid,
-            "time": param.get("time", 60),
+            "time": _resolve_action_time(param, 60),
             "sort": param.get("sort", 0),
-            "num": param.get("num", len(param.get("points", [])) or 1),
-            "points": _build_strike_points(param.get("points")),
+            "num": _resolve_strike_num(param, points),
+            "points": _build_strike_points(points),
         }
         # 火箭弹支持区域打击 type 字段
         if sid == 23:
@@ -2121,12 +2178,13 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
 
     # sid = 34: 红箭 13 导弹打击
     if sid == 34:
+        points = _resolve_strike_points(param)
         return {
             "sid": 34,
-            "time": param.get("time", 60),
+            "time": _resolve_action_time(param, 60),
             "sort": param.get("sort", 1),
-            "num": param.get("num", len(param.get("points", [])) or 1),
-            "points": _build_strike_points(param.get("points")),
+            "num": _resolve_strike_num(param, points),
+            "points": _build_strike_points(points),
         }
 
     # sid = 36: 激光照射
@@ -2153,7 +2211,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
     if sid in (54, 55):
         return {
             "sid": sid,
-            "time": param.get("time", 60),
+            "time": _resolve_action_time(param, 60),
             "tarty": param.get("tarty", 0),
             "attr": param.get("attr", 0),
             "thr": param.get("thr", 0),
@@ -2163,17 +2221,23 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "sug": param.get("sug", 0),
             "ammo": param.get("ammo", 0),
             "strategy": param.get("strategy", 0),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
         }
 
     # sid = 71: 空中侦察（service.points1/2/3 为三架无人机各自的航迹点数组，见 装备行动序列知识-0911 §6.2）
     if sid == 71:
         svc = param.get("service") if isinstance(param.get("service"), dict) else {}
+        # 0912 §6.2：time 优先；否则 scan_time_s 与 move_time_s 求和后四舍五入，缺项为 0
+        time_value = param.get("time")
+        if time_value is None and (param.get("scan_time_s") is not None or param.get("move_time_s") is not None):
+            time_value = int(float(param.get("scan_time_s", 0)) + float(param.get("move_time_s", 0)) + 0.5)
+        if time_value is None:
+            time_value = svc.get("time", 120)
         service = {
             "sid": 71,
-            "type": param.get("type", 2),
-            "mode": param.get("mode", 1),
-            "time": param.get("time", 120),
+            "type": param.get("type", svc.get("type", 2)),
+            "mode": param.get("mode", svc.get("mode", 1)),
+            "time": time_value,
         }
         for i in (1, 2, 3):
             service[f"points{i}"] = _build_air_recon_points(svc.get(f"points{i}"))
@@ -2189,7 +2253,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "num": param.get("num", 1),
             "freqtype": param.get("freqtype", 62),
             "frequency": param.get("frequency", []),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
         }
         direct = _build_direct(param.get("direct"))
         if direct and param.get("mode") == 4:
@@ -2207,7 +2271,7 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
             "num": param.get("num", 1),
             "freqtype": param.get("freqtype", 62),
             "frequency": param.get("frequency", []),
-            "area": _build_area_points(param.get("area")),
+            "area": _build_area_points(_resolve_area_points(param)),
             "protect": param.get("protect", {}),
         }
         direct = _build_direct(param.get("direct"))
@@ -2221,6 +2285,180 @@ def _build_service_from_action(action: Dict[str, Any], vehicle_type: str = "") -
 
     # 兜底
     return {"sid": 1, "points": [], "limited_speed": 20, "safe_mode": 0, "loop_mode": 0}
+
+
+def _is_effective_points(points: Any) -> bool:
+    """列表里至少有一个非全 0 的经纬点。
+
+    用于跳过「打开弹窗后保存」产生的全 0 占位，避免它遮蔽
+    area_points / targets 里的真实坐标（2026-11-10 排查结论）。
+    """
+    if not isinstance(points, list) or not points:
+        return False
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        lon = point.get("lon") if point.get("lon") is not None else point.get("longitude")
+        lat = point.get("lat") if point.get("lat") is not None else point.get("latitude")
+        try:
+            if float(lon or 0) != 0 or float(lat or 0) != 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _normalize_target_point(point: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """把 targets[] / target.location 中的点统一为 lon/lat/alt 键，并保留逐点属性。"""
+    if not isinstance(point, dict):
+        return None
+    lon = point.get("lon") if point.get("lon") is not None else point.get("longitude")
+    lat = point.get("lat") if point.get("lat") is not None else point.get("latitude")
+    if lon is None and lat is None:
+        return None
+    alt = point.get("alt") if point.get("alt") is not None else point.get("altitude")
+    result: Dict[str, Any] = {
+        "lon": lon if lon is not None else 0,
+        "lat": lat if lat is not None else 0,
+        "alt": alt if alt is not None else 0,
+    }
+    for key in ("tart", "attr", "thr", "dam", "blk", "figt", "sug"):
+        if point.get(key) is not None:
+            result[key] = point[key]
+    return result
+
+
+def _resolve_move_points(param: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """解析机动路径点（0912 的 target.waypoints → 协调卡 points）。"""
+    if not isinstance(param, dict):
+        return []
+    points = param.get("points")
+    if _is_effective_points(points):
+        return points
+    target = param.get("target")
+    if isinstance(target, dict):
+        waypoints = target.get("waypoints")
+        if _is_effective_points(waypoints):
+            result: List[Dict[str, Any]] = []
+            for waypoint in waypoints:
+                point = _normalize_target_point(waypoint)
+                if not point:
+                    continue
+                point.setdefault("radius", waypoint.get("radius", -1))
+                point.setdefault("type", waypoint.get("type", 1))
+                result.append(point)
+            return result
+    return []
+
+
+def _resolve_action_time(param: Dict[str, Any], default: Any) -> Any:
+    """任务时长：协调卡 time 优先，回退 0912 的 fire_duration_s。"""
+    if not isinstance(param, dict):
+        return default
+    value = param.get("time")
+    if value is None:
+        value = param.get("fire_duration_s")
+    return default if value is None else value
+
+
+def _resolve_strike_points(param: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """按《参考软件元任务数据结构》§10.2 / 0912 解析打击目标点（输入结构 → 协调卡 points）。
+
+    优先级：
+      1. param.points —— 已是协调卡结构，原样返回；
+      2. param.targets[] —— 参考软件/DS 的打击目标列表，每个目标可带 location（区域顶点）
+         或平铺的 lon/lat；
+      3. param.target.location —— 兜底；
+      4. param.fire_position —— 0912 打击类只给 target(id/name) + 打击位置 fire_position，
+         取该点作为目标点（语义待协议确认）。
+
+    区域目标（location 多顶点）暂按顶点序列展开；协调卡 sid=25 只有点目标、
+    区域语义待协议确认，因此 num 由 _resolve_strike_num 按点数重算。
+    """
+    if not isinstance(param, dict):
+        return []
+    points = param.get("points")
+    if _is_effective_points(points):
+        return points
+
+    targets = param.get("targets")
+    if isinstance(targets, list):
+        resolved: List[Dict[str, Any]] = []
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            location = target.get("location")
+            vertices = location if isinstance(location, list) and location else None
+            if vertices:
+                for vertex in vertices:
+                    point = _normalize_target_point(vertex)
+                    if not point:
+                        continue
+                    for key in ("tart", "attr", "thr", "dam", "blk", "figt", "sug"):
+                        if key not in point and target.get(key) is not None:
+                            point[key] = target[key]
+                    resolved.append(point)
+            else:
+                point = _normalize_target_point(target)
+                if point:
+                    resolved.append(point)
+        if _is_effective_points(resolved):
+            return resolved
+
+    target = param.get("target")
+    if isinstance(target, dict):
+        location = target.get("location")
+        if _is_effective_points(location):
+            normalized = [
+                point
+                for point in (_normalize_target_point(vertex) for vertex in location)
+                if point
+            ]
+            if _is_effective_points(normalized):
+                return normalized
+
+    fire_position = param.get("fire_position")
+    if isinstance(fire_position, dict):
+        point = _normalize_target_point(fire_position)
+        if point and _is_effective_points([point]):
+            return [point]
+    return []
+
+
+def _resolve_strike_num(param: Dict[str, Any], points: List[Dict[str, Any]]) -> int:
+    """计算协调卡 num（目标数量）。
+
+    - param.points 已是协调卡结构时保留原 num，保持既有下发行为；
+    - 从 targets 解析出来时按点数重算（协调卡 num 为目标数量）。
+    """
+    raw_points = param.get("points")
+    if isinstance(raw_points, list) and raw_points:
+        return param.get("num") or len(raw_points) or 1
+    return len(points) or param.get("num") or 1
+
+
+def _resolve_area_points(param: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """按《参考软件元任务数据结构》§10.3 / 0912 解析侦察/探测区域点（输入结构 → 协调卡 area）。
+
+    优先级：param.area（协调卡结构）→ param.area_points（DS/参考软件结构）→
+    param.target.location → param.fire_position（0912 强声/强光拒止只给打击位置）。
+    _build_area_points 已兼容 lon/longitude 两种键名。
+    """
+    if not isinstance(param, dict):
+        return []
+    for key in ("area", "area_points"):
+        value = param.get(key)
+        if _is_effective_points(value):
+            return value
+    target = param.get("target")
+    if isinstance(target, dict):
+        location = target.get("location")
+        if _is_effective_points(location):
+            return location
+    fire_position = param.get("fire_position")
+    if isinstance(fire_position, dict) and _is_effective_points([fire_position]):
+        return [fire_position]
+    return []
 
 
 def _build_gun_shot_points(points):
@@ -3069,6 +3307,7 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
             "teams_count": len(item.get("teams") or []),
             "stages_count": len(item.get("stages") or []),
             "vehicle_summary": _build_vehicle_summary_brief(item),
+            "replaces_plan_id": item.get("replaces_plan_id"),
         })
     return result
 
