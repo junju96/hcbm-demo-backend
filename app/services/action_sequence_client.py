@@ -24,11 +24,19 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-from app.config import get_formation_mission_send_url, get_seat_target_ips
+from app.config import (
+    COORDINATION_NODE_ID,
+    OPERATOR_NODE_ID,
+    get_formation_mission_send_url,
+    get_seat_target_ips,
+)
 from app.services.data_server_client import (
     _http_get, _http_post, _http_patch,
     _http_get_operator, _http_post_operator, _http_patch_operator,
     _http_get_resource_pool,
+    _query_resources_for_node,
+    _resource_id_for_node,
+    _resource_id_without_node,
     forward_resources_to_targets,
 )
 from app.services.task_pool import task_pool
@@ -79,6 +87,8 @@ def _build_car_actions_from_plan(
     plan: Dict[str, Any],
     http_post=_http_post,
     fill_actions: bool = True,
+    node_id: Optional[str] = None,
+    http_get=None,
 ) -> List[Dict[str, Any]]:
     """
     将 plan.stages[].team_actions 转换为按车辆(vid)组织的行动序列列表。
@@ -94,9 +104,9 @@ def _build_car_actions_from_plan(
     操控席调用时应传入 _http_post_operator，避免席位数据串用。
 
     fill_actions=False 时跳过 CAR_ACTIONS/ACTION 补全查询：列表摘要（vehicle_summary）
-    只需要 vid + resource_type，而 DS query 的 filters 不生效（每次返回全池数据，单次
-    ~0.5s），plan 多时每条空 actions 的 plan 都要补 2 次全池查询，会把列表接口拖过
-    前端 8s 超时（2026-10-30：170 条 plan 时列表接口 9.4s，前端显示"暂无方案"）。
+    只需要 vid + resource_type，避免在列表路径逐 plan 补全导致前端超时。
+    node_id 非空时通过网关列表读取对应节点的 CAR_ACTIONS/ACTION，防止同业务 ID 的
+    多节点副本互相补全；node_id 为空保留旧调用方式，供通用 helper 测试使用。
     """
     plan_id = plan.get("plan_id", "")
     stages = plan.get("stages", [])
@@ -160,14 +170,20 @@ def _build_car_actions_from_plan(
 
     # 按 plan_id 查询 CAR_ACTIONS / ACTION 资源补全 actions（按 car_actions_id 精确匹配，避免跨阶段串用）
     if missing_queries:
+        def query_resources(task_type, query_limit):
+            if node_id is not None:
+                getter = http_get or (_http_get_operator if str(node_id) != COORDINATION_NODE_ID else _http_get)
+                return _query_resources_for_node(getter, task_type, str(node_id), query_limit)
+            return http_post(
+                "/api/v1/task_pool/resources/query",
+                {"task_type": task_type, "limit": query_limit, "filters": {"plan_id": plan_id}},
+                silent=False,
+                timeout=(1, 10),
+            )
+
         try:
             print(f"[AS-DEBUG] _build_car_actions_from_plan try to query CAR_ACTIONS for plan_id={plan_id}, missing_vids={[q[4] for q in missing_queries]}")
-            car_actions_data = http_post(
-                "/api/v1/task_pool/resources/query",
-                {"task_type": "CAR_ACTIONS", "limit": 200, "filters": {"plan_id": plan_id}},
-                silent=False,
-                timeout=(1, 5),
-            )
+            car_actions_data = query_resources("CAR_ACTIONS", 200)
             print(f"[AS-DEBUG] CAR_ACTIONS query returned type={type(car_actions_data)}, len={len(car_actions_data) if isinstance(car_actions_data, list) else 'N/A'}")
             if isinstance(car_actions_data, list):
                 # 建立 car_actions_id -> actions / action_ids 映射，按资源精确匹配而不是按 vid 汇总
@@ -195,12 +211,7 @@ def _build_car_actions_from_plan(
 
                 action_by_id = {}
                 if needed_action_ids:
-                    action_resources = http_post(
-                        "/api/v1/task_pool/resources/query",
-                        {"task_type": "ACTION", "limit": 500, "filters": {"plan_id": plan_id}},
-                        silent=False,
-                        timeout=(1, 10),
-                    )
+                    action_resources = query_resources("ACTION", 500)
                     print(f"[AS-DEBUG] ACTION query returned type={type(action_resources)}, len={len(action_resources) if isinstance(action_resources, list) else 'N/A'}")
                     if isinstance(action_resources, list):
                         for a in action_resources:
@@ -317,7 +328,7 @@ def _to_ds_native_field_names(obj: Any) -> Any:
 
 def _plan_sort_key(item: Dict[str, Any]) -> Tuple[int, str]:
     """按 plan_id 末尾数字升序排序；无数字的排最后，并按原字符串稳定排序。"""
-    plan_id = item.get("plan_id") or item.get("resource_id", "").replace("plan:", "") or ""
+    plan_id = item.get("plan_id") or _resource_id_without_node(item.get("resource_id", "")).replace("plan:", "") or ""
     match = re.search(r"(\d+)$", plan_id)
     if match:
         return (0, int(match.group(1)))
@@ -483,21 +494,8 @@ def _normalize_action_timing(plan: Dict[str, Any]) -> None:
 
 
 def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
-    """查询行动方案列表 — 调用数据服务器 POST /resources/query。
-    任务列表直接从数据服务器拉取，不使用本地缓存/假数据。"""
-    data = _http_post(
-        "/api/v1/task_pool/resources/query",
-        {"task_type": "PLAN", "limit": limit},
-        silent=False,
-        timeout=(1, 10),
-    )
-    items = []
-    if data is not None and isinstance(data, list):
-        items = data[:limit]
-    elif data is not None and isinstance(data, dict):
-        # /retrieval/query 返回 { items: [...] }
-        items = (data.get("items") or data.get("data") or [])[:limit]
-
+    """查询主控节点行动方案；未标 node_id 的存量数据归主控。"""
+    items = _query_resources_for_node(_http_get, "PLAN", COORDINATION_NODE_ID, limit)
     items.sort(key=_plan_sort_key)
 
     result = []
@@ -517,7 +515,7 @@ def query_plans(limit: int = 200) -> List[Dict[str, Any]]:
         if idx == 0:
             print(f"[AS-DEBUG] query_plans first item: resource_id={item.get('resource_id')}, stages_count={len(stages) if isinstance(stages, list) else 'N/A'}")
         result.append({
-            "plan_id": item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or _resource_id_without_node(item.get("resource_id", "")).replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
             "description": item.get("description") or "",
@@ -563,7 +561,9 @@ def get_plan_detail(plan_id: str) -> Optional[Dict[str, Any]]:
     # 本地缓存中的坐标已为浮点，确保反缩放（对浮点无影响）
     plan = _scale_coords_to_float(plan)
 
-    car_actions = _build_car_actions_from_plan(plan)
+    car_actions = _build_car_actions_from_plan(
+        plan, node_id=COORDINATION_NODE_ID, http_get=_http_get
+    )
     result = _to_frontend_plan(plan, car_actions)
     # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
     action_runtime.init_state_from_plan(plan_id, result)
@@ -1248,7 +1248,10 @@ def _import_plan_payload(rid: str, plan: Dict[str, Any], http_post, label: str =
         payload.pop(key, None)
     payload["resource_id"] = rid
     payload.setdefault("task_type", "PLAN")
-    payload.setdefault("plan_id", rid.replace("plan:", ""))
+    payload.setdefault("plan_id", _resource_id_without_node(rid).replace("plan:", ""))
+    if label == "operator":
+        payload["plan_id"] = _resource_id_without_node(payload["plan_id"])
+        payload["node_id"] = OPERATOR_NODE_ID
     # 数据服务器要求 action.param 中的经纬高以 10^6 缩放后的整数存储
     payload = _scale_coords_to_int(payload)
     result = http_post(
@@ -1417,9 +1420,12 @@ def update_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> 
 
 
 def update_operator_action_param(plan_id: str, action_id: str, param: Dict[str, Any]) -> bool:
-    """操控端 — 更新指定 action 的 param 并写回操控席数据服务器。"""
+    """操控端 — 更新 @2 副本中指定 action 的 param。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
     return _update_action_param_impl(
-        plan_id, action_id, param, _http_get_operator, _http_post_operator, "operator"
+        rid, action_id, param, _http_get_operator, _http_post_operator, "operator"
     )
 
 
@@ -1448,8 +1454,13 @@ def notify_plan_map_clicked_coordinator(plan_id: str) -> Dict[str, Any]:
 
 
 def notify_plan_map_clicked_operator(plan_id: str) -> Dict[str, Any]:
-    """操控席 — 通知操控席数据服务器。"""
-    return notify_plan_map_clicked(plan_id, _http_patch_operator, "operator")
+    """操控席 — 通知操控席 @2 副本。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
+    result = notify_plan_map_clicked(rid, _http_patch_operator, "operator")
+    result["plan_id"] = _resource_id_without_node(result.get("plan_id", plan_id)).replace("plan:", "")
+    return result
 
 
 # ========== 行动序列运行时状态管理（内存） ==========
@@ -3026,7 +3037,7 @@ def publish_formation_mission_if_any(plan_id: str) -> Dict[str, Any]:
             send_url,
             json=body,
             timeout=10,
-            proxies={"http": None, "https": None},
+            proxies={"http": None, "https": None, "all": None},
         )
         result["ok"] = resp.ok
         result["status_code"] = resp.status_code
@@ -3264,25 +3275,8 @@ def get_online_vehicle_info_from_resource_pool(vid: str) -> Optional[Dict[str, A
 
 
 def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
-    """向操控席数据服务器查询行动方案列表 — POST /resources/query（静默模式）。
-    任务列表直接从数据服务器拉取，不使用本地缓存/假数据。"""
-    data = _http_post_operator(
-        "/api/v1/task_pool/resources/query",
-        {"task_type": "PLAN", "limit": limit},
-        silent=False,
-        timeout=(1, 30),
-    )
-    items = []
-    if data is not None and isinstance(data, list):
-        items = data[:limit]
-        print(f"[AS-DEBUG] query_plans_operator: data is list, len={len(data)}, limit={limit}")
-    elif data is not None and isinstance(data, dict):
-        raw_items = data.get("items") or data.get("data") or []
-        items = raw_items[:limit]
-        print(f"[AS-DEBUG] query_plans_operator: data is dict, keys={list(data.keys())}, items_len={len(raw_items)}, limit={limit}")
-    else:
-        print(f"[AS-DEBUG] query_plans_operator: data is None or type={type(data)}")
-
+    """查询操控席 node_id=2 的行动方案列表。"""
+    items = _query_resources_for_node(_http_get_operator, "PLAN", OPERATOR_NODE_ID, limit)
     items.sort(key=_plan_sort_key)
 
     result = []
@@ -3299,7 +3293,7 @@ def query_plans_operator(limit: int = 200) -> List[Dict[str, Any]]:
         )
         state = item.get("state") or "DRAFT"
         result.append({
-            "plan_id": item.get("plan_id") or item.get("resource_id", "").replace("plan:", ""),
+            "plan_id": item.get("plan_id") or _resource_id_without_node(item.get("resource_id", "")).replace("plan:", ""),
             "resource_id": item.get("resource_id", ""),
             "title": title,
             "description": item.get("description") or "",
@@ -3330,9 +3324,10 @@ def _fetch_plan_uuid_from_raw(rid: str) -> Optional[Any]:
 
 
 def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
-    """向操控席数据服务器获取方案详情（静默模式）。
-    任务详情直接从数据服务器拉取，不使用本地缓存。"""
-    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    """读取操控席 @2 副本，返回前端的业务 plan_id 保持不带后缀。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
 
     data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
     if data is None or not isinstance(data, dict):
@@ -3346,10 +3341,15 @@ def get_plan_detail_operator(plan_id: str) -> Optional[Dict[str, Any]]:
         if uuid_val is not None:
             plan["uuid"] = uuid_val
 
-    car_actions = _build_car_actions_from_plan(plan, http_post=_http_post_operator)
+    car_actions = _build_car_actions_from_plan(
+        plan,
+        http_post=_http_post_operator,
+        node_id=OPERATOR_NODE_ID,
+        http_get=_http_get_operator,
+    )
     result = _to_frontend_plan(plan, car_actions)
     # 根据数据服务端中的 action 状态推断并初始化运行时状态（避免前后端不一致）
-    action_runtime.init_state_from_plan(plan_id, result)
+    action_runtime.init_state_from_plan(result.get("plan_id") or plan_id, result)
     return result
 
 
@@ -3359,9 +3359,16 @@ def import_plan_to_operator(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     plan 来自前端（本地命名），写入前需把 teams 的 name/vehicles 转为
     DS 原生命名 team_name/team_equipments，否则 DS 生成默认编组名且丢车辆。
     """
+    payload = _to_ds_native_field_names(copy.deepcopy(plan))
+    payload["resource_id"] = _resource_id_for_node(
+        payload.get("resource_id") or f"plan:{payload.get('plan_id', '')}", OPERATOR_NODE_ID
+    )
+    payload["node_id"] = OPERATOR_NODE_ID
+    if payload.get("plan_id"):
+        payload["plan_id"] = _resource_id_without_node(payload["plan_id"])
     result = _http_post_operator(
         "/api/v1/task_pool/ingestion/import",
-        {"resources": [_scale_coords_to_int(_to_ds_native_field_names(plan))], "return_data_type": "typed", "ignore_errors": True},
+        {"resources": [_scale_coords_to_int(payload)], "return_data_type": "typed", "ignore_errors": True},
     )
     return result
 
@@ -3373,7 +3380,7 @@ def _next_sequential_plan_id(plan_ids) -> str:
     """取现有 plan-<数字> 形式 id 的数字后缀最大值 +1，格式 plan-六位数字（超出 6 位继续递增）"""
     max_num = 0
     for pid in plan_ids:
-        m = _PLAN_SEQ_ID_RE.match(str(pid or ""))
+        m = _PLAN_SEQ_ID_RE.match(_resource_id_without_node(str(pid or "")))
         if m:
             max_num = max(max_num, int(m.group(1)))
     return f"plan-{max_num + 1:06d}"
@@ -3393,17 +3400,19 @@ def _generate_operator_plan_id() -> str:
 
 
 def create_operator_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """在本地 task_pool 创建/保存一个新的 PLAN 资源；操控席数据服务器不可达时作为兜底"""
+    """创建操控席 @2 方案；DS 不可达时仅保留同节点本地缓存。"""
     from app.services.task_pool import task_pool
 
     plan_id = plan.get("plan_id") or plan.get("resource_id", "").replace("plan:", "")
+    plan_id = _resource_id_without_node(plan_id)
     if not plan_id:
         plan_id = _generate_operator_plan_id()
-        plan["plan_id"] = plan_id
+    plan["plan_id"] = plan_id
 
-    rid = plan.get("resource_id") or f"plan:{plan_id}"
+    rid = _resource_id_for_node(plan.get("resource_id") or f"plan:{plan_id}", OPERATOR_NODE_ID)
     plan["resource_id"] = rid
     plan["task_type"] = "PLAN"
+    plan["node_id"] = OPERATOR_NODE_ID
 
     now = datetime.now(timezone.utc).isoformat()
     plan.setdefault("created_at", now)
@@ -3481,8 +3490,12 @@ def update_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[
     return task_pool.get(rid)
 
 
-# 兼容旧名：操控席本地更新与协同席共用同一套本地更新逻辑
-update_operator_plan_locally = update_plan_locally
+def update_operator_plan_locally(plan_id: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """仅更新操控席 @2 本地缓存，不同步到数据服务器。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
+    return update_plan_locally(rid, payload)
 
 
 # 前端编辑保存传入的字段名 → DS 文档字段名（写回保持 DS 原始命名）
@@ -3690,8 +3703,11 @@ def sync_plan_to_data_server(
 
 
 def sync_plan_to_operator(plan_id: str) -> bool:
-    """把本地 task_pool 中的 plan 同步到操控席数据服务器。"""
-    return sync_plan_to_data_server(plan_id, _http_post_operator, _http_get_operator, label="operator")
+    """同步操控席 @2 副本，本地缓存键同样带节点后缀。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
+    return sync_plan_to_data_server(rid, _http_post_operator, _http_get_operator, label="operator")
 
 
 def _cascade_delete_resource(
@@ -3837,8 +3853,13 @@ def _delete_vehicle_from_plan(
 
 
 def delete_vehicle_operator(plan_id: str, vid: str) -> Dict[str, Any]:
-    """删除操控席方案中指定车辆的行动序列。"""
-    return _delete_vehicle_from_plan(plan_id, vid, _http_post_operator, _http_get_operator, label="operator")
+    """删除操控席 @2 方案中指定车辆的行动序列。"""
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
+    result = _delete_vehicle_from_plan(rid, vid, _http_post_operator, _http_get_operator, label="operator")
+    result["plan_id"] = _resource_id_without_node(result.get("plan_id", plan_id)).replace("plan:", "")
+    return result
 
 
 def delete_vehicle(plan_id: str, vid: str) -> Dict[str, Any]:

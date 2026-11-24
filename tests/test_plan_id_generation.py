@@ -56,7 +56,7 @@ class TestCreateOperatorPlanIdFallback(unittest.TestCase):
              patch.object(asc, "import_plan_to_operator", return_value=None):
             saved = asc.create_operator_plan({"title": "测试方案"})
         self.assertEqual(saved["plan_id"], "plan-000002")
-        self.assertEqual(saved["resource_id"], "plan:plan-000002")
+        self.assertEqual(saved["resource_id"], "plan:plan-000002@2")
 
     def test_keeps_frontend_provided_id(self):
         with patch.object(asc, "import_plan_to_operator", return_value=None):

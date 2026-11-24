@@ -15,11 +15,11 @@ import os
 from typing import Any, Dict, List
 
 # ========== 数据服务器 ==========
-# 协同席数据服务器（PLAN / KILL_CHAIN / ACTION 等）
+# 协同席与操控席共用任务池，task 域通过 node_id 隔离副本。
 DATA_SERVER_BASE_URL = "http://25.11.1.178:28801"
-
-# 操控席数据服务器（操控端 PLAN / ACTION / CAR_ACTIONS 等）
-OPERATOR_DATA_SERVER_BASE_URL = "http://25.11.1.56:28801"
+OPERATOR_DATA_SERVER_BASE_URL = DATA_SERVER_BASE_URL
+COORDINATION_NODE_ID = "1"
+OPERATOR_NODE_ID = "2"
 
 # 资源池服务（在线车辆、装备资源）
 RESOURCE_POOL_BASE_URL = "http://25.11.1.178:28800"

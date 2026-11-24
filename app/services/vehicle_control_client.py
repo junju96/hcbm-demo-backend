@@ -55,7 +55,7 @@ def query_vehicle_info_all(
         resp = requests.get(
             url,
             timeout=timeout,
-            proxies={"http": None, "https": None},
+            proxies={"http": None, "https": None, "all": None},
         )
         resp.raise_for_status()
         data = resp.json()

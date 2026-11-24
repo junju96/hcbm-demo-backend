@@ -54,7 +54,7 @@ class TestNotifyPlanMapClicked(unittest.TestCase):
             m_coord.assert_called_once()
             m_op.assert_called_once()
             self.assertIn("plan:plan-1", m_coord.call_args[0][0])
-            self.assertIn("plan:plan-2", m_op.call_args[0][0])
+            self.assertIn("plan:plan-2@2", m_op.call_args[0][0])
 
 
 if __name__ == "__main__":

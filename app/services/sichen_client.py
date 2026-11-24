@@ -63,7 +63,7 @@ def call_plan_allocation(
     url = f"{SICHEN_BASE_URL}/plan"
     try:
         print(f"[SICHEN-OUT] POST {url} | vehicles={len(vehicles)} targets={len(targets)}")
-        resp = requests.post(url, json=payload, timeout=15, proxies={"http": None, "https": None})
+        resp = requests.post(url, json=payload, timeout=15, proxies={"http": None, "https": None, "all": None})
         print(f"[SICHEN-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
         return resp.json()

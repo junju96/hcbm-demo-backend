@@ -82,7 +82,7 @@ def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             url,
             json=payload,
             timeout=REQUEST_TIMEOUT_SECONDS,
-            proxies={"http": None, "https": None},
+            proxies={"http": None, "https": None, "all": None},
         )
         try:
             response_text = resp.text
@@ -407,7 +407,7 @@ def _send_warning(
             url,
             json=payload,
             timeout=WARNING_REQUEST_TIMEOUT_SECONDS,
-            proxies={"http": None, "https": None},
+            proxies={"http": None, "https": None, "all": None},
         )
         resp.raise_for_status()
         result = {"ok": True, "status_code": resp.status_code, "error": None, "data": resp.json()}

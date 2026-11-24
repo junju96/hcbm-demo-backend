@@ -22,6 +22,7 @@ DS_HTTP_DEBUG = True
 # ========== 配置 ==========
 # 服务地址统一定义在 app/config.py 中，便于查找和修改
 from app.config import (
+    OPERATOR_NODE_ID,
     get_data_server_url,
     get_operator_data_server_url,
     get_resource_pool_url,
@@ -55,7 +56,7 @@ def validate_resource_state(resource: Dict[str, Any]) -> tuple[bool, str]:
 
 # ========== 内部 HTTP 调用 ==========
 
-def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False, timeout: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
     if not HAS_REQUESTS:
         return None
     url = f"{get_data_server_url()}{path}"
@@ -63,7 +64,7 @@ def _http_get(path: str, params: Optional[Dict] = None, silent: bool = False) ->
     try:
         if debug:
             print(f"[DS-OUT] GET  {url} | params={params}")
-        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.get(url, params=params, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -83,7 +84,7 @@ def _http_post(path: str, json_body: Optional[Dict] = None, silent: bool = False
     try:
         if debug:
             print(f"[DS-OUT] POST {url} | body={body_summary}")
-        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -103,7 +104,7 @@ def _http_patch(path: str, json_body: Optional[Dict] = None, silent: bool = Fals
     try:
         if debug:
             print(f"[DS-OUT] PATCH {url} | body={body_summary}")
-        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -133,7 +134,7 @@ def forward_resources_to_targets(
     try:
         if not silent:
             print(f"[DS-OUT] POST {url} | body={body_summary}")
-        resp = requests.post(url, json=body, timeout=(1, timeout_seconds), proxies={"http": None, "https": None})
+        resp = requests.post(url, json=body, timeout=(1, timeout_seconds), proxies={"http": None, "https": None, "all": None})
         if not silent:
             print(f"[DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -281,18 +282,109 @@ def to_frontend_killchain_list(items: List[Dict[str, Any]]) -> List[Dict[str, An
     return results
 
 
+# ========== task 域节点隔离 ==========
+
+_TASK_RESOURCE_TYPES = {"PLAN", "STAGE", "TEAM", "ACTION", "CAR_ACTIONS", "TACTIC"}
+_TASK_RESOURCE_PREFIXES = (
+    "plan:", "stage:", "team:", "action:", "car_actions:", "car_action:", "tactic:",
+)
+
+
+def _resource_id_without_node(resource_id: str) -> str:
+    """去掉 resource_id 末尾的数字节点标记，业务 ID 本身不带节点。"""
+    value = str(resource_id or "")
+    base, separator, node = value.rpartition("@")
+    return base if separator and node.isdigit() else value
+
+
+def _resource_id_for_node(resource_id: str, node_id: str) -> str:
+    """主控资源不加后缀，其他 task 域资源统一使用 @node 副本。"""
+    value = _resource_id_without_node(resource_id)
+    if not value or str(node_id) == "1":
+        return value
+    return f"{value}@{node_id}"
+
+
+def _operator_resource_path(path: str) -> str:
+    """将操控席资源路径定向到本节点副本，query/import 等非资源路径不变。"""
+    prefix = "/api/v1/task_pool/resources/"
+    if not path.startswith(prefix):
+        return path
+    rest = path[len(prefix):]
+    simple_prefix = "simple/"
+    if rest.startswith(simple_prefix):
+        rest = rest[len(simple_prefix):]
+    else:
+        simple_prefix = ""
+    resource_id, separator, suffix = rest.partition("/")
+    if not resource_id.startswith(_TASK_RESOURCE_PREFIXES):
+        return path
+    operator_id = _resource_id_for_node(resource_id, OPERATOR_NODE_ID)
+    return f"{prefix}{simple_prefix}{operator_id}{separator}{suffix}"
+
+
+def _prepare_operator_body(path: str, json_body: Optional[Dict]) -> Optional[Dict]:
+    """import 时递归标记 task 子资源，保持 plan_id/action_ids 等业务 ID 不变。"""
+    if path != "/api/v1/task_pool/ingestion/import" or not isinstance(json_body, dict):
+        return json_body
+
+    def convert(value):
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: convert(item) for key, item in value.items()}
+        resource_id = result.get("resource_id")
+        if str(result.get("task_type") or "").upper() in _TASK_RESOURCE_TYPES or (
+            isinstance(resource_id, str) and resource_id.startswith(_TASK_RESOURCE_PREFIXES)
+        ):
+            if resource_id:
+                result["resource_id"] = _resource_id_for_node(resource_id, OPERATOR_NODE_ID)
+            result["node_id"] = OPERATOR_NODE_ID
+        return result
+
+    body = convert(json_body)
+    body["node_id"] = OPERATOR_NODE_ID
+    return body
+
+
+def _query_resources_for_node(http_get, task_type: str, node_id: str, limit: int) -> List[Dict[str, Any]]:
+    """通过网关列表按节点读取，再在客户端按类型过滤；未标节点的存量资源归主控。"""
+    data = http_get(
+        "/api/v1/task_pool/resources",
+        params={"limit": 100000, "node_id": str(node_id)},
+        silent=False,
+        timeout=(1, 30),
+    )
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("items") or data.get("data") or []
+    else:
+        items = []
+    expected_type = task_type.upper()
+    expected_node = str(node_id)
+    filtered = [
+        item for item in items
+        if isinstance(item, dict)
+        and str(item.get("task_type") or "").upper() == expected_type
+        and str(item.get("node_id") or "1") == expected_node
+    ]
+    return filtered[:limit]
+
+
 # ========== 操控席数据服务端 HTTP 调用 ==========
 
-def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = False) -> Optional[Dict[str, Any]]:
+def _http_get_operator(path: str, params: Optional[Dict] = None, silent: bool = False, timeout: Optional[tuple] = None) -> Optional[Dict[str, Any]]:
     """向操控席数据服务器发送 GET 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{get_operator_data_server_url()}{path}"
+    url = f"{get_operator_data_server_url()}{_operator_resource_path(path)}"
     debug = not silent or DS_HTTP_DEBUG
     try:
         if debug:
             print(f"[OP-DS-OUT] GET  {url} | params={params}")
-        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.get(url, params=params, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[OP-DS-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -311,7 +403,7 @@ def _http_get_resource_pool(path: str, params: Optional[Dict] = None, silent: bo
     try:
         if not silent:
             print(f"[RP-OUT] GET  {url} | params={params}")
-        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.get(url, params=params, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if not silent:
             print(f"[RP-IN ] GET  {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -326,13 +418,14 @@ def _http_post_operator(path: str, json_body: Optional[Dict] = None, silent: boo
     """向操控席数据服务器发送 POST 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{get_operator_data_server_url()}{path}"
+    url = f"{get_operator_data_server_url()}{_operator_resource_path(path)}"
+    json_body = _prepare_operator_body(path, json_body)
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:
         if debug:
             print(f"[OP-DS-OUT] POST {url} | body={body_summary}")
-        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.post(url, json=json_body, timeout=timeout or TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[OP-DS-IN ] POST {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()
@@ -347,13 +440,13 @@ def _http_patch_operator(path: str, json_body: Optional[Dict] = None, silent: bo
     """向操控席数据服务器发送 PATCH 请求"""
     if not HAS_REQUESTS:
         return None
-    url = f"{get_operator_data_server_url()}{path}"
+    url = f"{get_operator_data_server_url()}{_operator_resource_path(path)}"
     body_summary = json.dumps(json_body, ensure_ascii=False)[:300] if json_body else ""
     debug = not silent or DS_HTTP_DEBUG
     try:
         if debug:
             print(f"[OP-DS-OUT] PATCH {url} | body={body_summary}")
-        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None})
+        resp = requests.patch(url, json=json_body, timeout=TIMEOUT_SECONDS, proxies={"http": None, "https": None, "all": None})
         if debug:
             print(f"[OP-DS-IN ] PATCH {url} | status={resp.status_code} | len={len(resp.text)}")
         resp.raise_for_status()

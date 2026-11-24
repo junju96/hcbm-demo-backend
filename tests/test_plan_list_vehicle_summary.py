@@ -10,6 +10,7 @@ def _plan_with_teams():
     return {
         "plan_id": "plan-t1",
         "resource_id": "plan:plan-t1",
+        "task_type": "PLAN",
         "title": "测试方案",
         "teams": [
             {"team_id": "TEAM_NEW", "vehicles": [{"vid": "equipment:ZD01", "resource_type": "Recon-Strike-UGV"}]},
@@ -56,7 +57,7 @@ class TestPlanReplacesField(unittest.TestCase):
 
     def test_coordination_list_carries_replaces_plan_id(self):
         raw = [self._raw_plan(None), self._raw_plan("plan-old")]
-        with patch.object(asc, "_http_post", return_value=raw):
+        with patch.object(asc, "_http_get", return_value=raw):
             items = asc.query_plans()
         self.assertEqual(
             [item["replaces_plan_id"] for item in items],
@@ -64,8 +65,11 @@ class TestPlanReplacesField(unittest.TestCase):
         )
 
     def test_operator_list_carries_replaces_plan_id_and_defaults_none(self):
-        raw = [self._raw_plan("plan-old"), _plan_with_teams()]
-        with patch.object(asc, "_http_post_operator", return_value=raw):
+        raw = [
+            {**self._raw_plan("plan-old"), "node_id": "2"},
+            {**_plan_with_teams(), "node_id": "2"},
+        ]
+        with patch.object(asc, "_http_get_operator", return_value=raw):
             items = asc.query_plans_operator()
         self.assertEqual(
             [item["replaces_plan_id"] for item in items],

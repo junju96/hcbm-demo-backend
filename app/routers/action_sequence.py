@@ -22,6 +22,8 @@ from pydantic import BaseModel
 from typing import Any, Dict, Optional
 
 from app.models.schemas import ApiResponse
+from app.config import OPERATOR_NODE_ID
+from app.services.data_server_client import _resource_id_for_node, _resource_id_without_node
 from app.services.action_sequence_client import (
     query_plans,
     get_plan_detail,
@@ -534,7 +536,10 @@ async def delete_vehicle_from_plan(plan_id: str, vid: str):
 @router.patch("/action-sequences/operator/plans/{plan_id}", response_model=ApiResponse)
 async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     """操控端 — 更新方案并保存到操控席数据服务器（使用 import 全量保存，确保 stages/team_actions 落盘）"""
-    rid = plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}"
+    rid = _resource_id_for_node(
+        plan_id if plan_id.startswith("plan:") else f"plan:{plan_id}", OPERATOR_NODE_ID
+    )
+    business_plan_id = _resource_id_without_node(plan_id).replace("plan:", "")
 
     # 1. 先检查 plan 是否存在
     data = _http_get_operator(f"/api/v1/task_pool/resources/simple/{rid}", silent=False)
@@ -550,7 +555,8 @@ async def patch_plan_operator(plan_id: str, body: Dict[str, Any]):
     plan = _to_ds_native_field_names(body)
     plan["resource_id"] = rid
     plan["task_type"] = "PLAN"
-    plan["plan_id"] = plan_id
+    plan["plan_id"] = business_plan_id
+    plan["node_id"] = OPERATOR_NODE_ID
     plan["updated_at"] = datetime.now(timezone.utc).isoformat()
     # uuid：当前时间戳（毫秒）后六位整数，发布时作为 send_mission 的 tid
     plan["uuid"] = int(datetime.now(timezone.utc).timestamp() * 1000) % 1000000
